@@ -1,6 +1,6 @@
 APP          := pico8pocket
 PROJECT_ROOT ?= $(abspath ../..)
-SDK_ROOT     ?= $(PROJECT_ROOT)/.deps/openfgpaSDK
+SDK_ROOT     ?= $(PROJECT_ROOT)/.deps/diablo
 FAKE08_ROOT  ?= $(PROJECT_ROOT)/.deps/fake-08
 SDK_DIR      := $(SDK_ROOT)/src/sdk
 OBJ_DIR      := $(PROJECT_ROOT)/.obj/$(APP)

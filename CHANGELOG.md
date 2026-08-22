@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.0.32 — 2026-08-22
+
+Local hardware-test build.
+
+### Highlights
+
+- Moves the Pocket hardware/runtime base from the July openfpgaOS API 0.7.0
+  snapshot to the matched API 0.8.1 SDK and runtime shipped by the official
+  Diablo port. The application, OS image and `os20` bitstream now come from a
+  mutually compatible generation rather than mixing old SDK headers with new
+  binaries.
+- Uses the newer dual-issue VexiiRiscv `rv32imafc` configuration at a
+  timing-closed 90 MHz, with 32 KiB instruction and 64 KiB data caches and the
+  August openfpgaOS Pocket fixes.
+- Pins and verifies the Diablo source archive and all three Pocket runtime
+  files by checksum so local builds cannot silently drift with upstream.
+
+### Expected impact
+
+- This is primarily a hardware/runtime-base test. It may improve consistency,
+  cache behaviour and input/runtime correctness, but does not remove z8lua's
+  interpreter cost by itself; CPU-heavy cartridges still need real-device
+  profiling before performance claims are made.
+- Save-state persistence, cartridge selection, menu input and audio must be
+  regression-tested on physical Pocket hardware because the kernel/SDK base
+  changed together.
+
 ## 0.0.31 — 2026-07-25
 
 Second public alpha release.

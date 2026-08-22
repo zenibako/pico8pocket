@@ -5,7 +5,8 @@
 Pico8Pocket is an openFPGA core wrapping an openfpgaOS application. The current
 ThinkElastic stack provides:
 
-- VexiiRiscv `rv32imafc`, 100 MHz;
+- VexiiRiscv `rv32imafc`, dual issue at 90 MHz, with 32 KiB instruction and
+  64 KiB data caches;
 - 64 MB SDRAM;
 - indexed and direct-color framebuffers;
 - 48 kHz stereo audio and a hardware PCM mixer;
@@ -15,7 +16,9 @@ ThinkElastic stack provides:
 
 The `os20` bitstream is the default because PICO-8 is a 2D workload and benefits
 more from its dual-issue CPU than from the 2.5D/3D accelerators in the other
-variants.
+variants. Version 0.0.32 pins the matched SDK and Pocket runtime published with
+Diablo at commit `2687e3d0c22d659674dbc6717959a98aedd92957`; its runtime manifest
+identifies openfpgaOS source commit `453a283` and API 0.8.1.
 
 ## Runtime boundaries
 

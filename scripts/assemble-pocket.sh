@@ -2,7 +2,8 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SDK_ROOT="$PROJECT_ROOT/.deps/openfgpaSDK"
+SDK_ROOT="$PROJECT_ROOT/.deps/diablo"
+SDK_NOTICE_ROOT="$PROJECT_ROOT/.deps/openfgpaSDK"
 FAKE08_ROOT="$PROJECT_ROOT/.deps/fake-08"
 OUT="$PROJECT_ROOT/build/pocket/pico8pocket"
 BUNDLE_LOCAL_CARTS="${BUNDLE_LOCAL_CARTS:-0}"
@@ -44,8 +45,8 @@ cp "$PROJECT_ROOT/assets/p8p_slot_pad.bin" "$ASSET_DIR/p8p_pad7.ofsf"
 cp "$PROJECT_ROOT/assets/cards/README.txt" "$ASSET_DIR/cards/"
 cp "$PROJECT_ROOT/LICENSE" "$CORE_DIR/LICENSE.txt"
 cp "$PROJECT_ROOT/THIRD_PARTY_NOTICES.md" "$CORE_DIR/THIRD_PARTY_NOTICES.txt"
-cp "$SDK_ROOT/LICENSE" "$CORE_DIR/openfpgaOS-SDK-LICENSE.txt"
-cp "$SDK_ROOT/NOTICE" "$CORE_DIR/openfpgaOS-SDK-NOTICE.txt"
+cp "$SDK_NOTICE_ROOT/LICENSE" "$CORE_DIR/openfpgaOS-SDK-LICENSE.txt"
+cp "$SDK_NOTICE_ROOT/NOTICE" "$CORE_DIR/openfpgaOS-SDK-NOTICE.txt"
 cp "$FAKE08_ROOT/LICENSE.MD" "$CORE_DIR/Fake-08-LICENSE.txt"
 
 cart_count=0
