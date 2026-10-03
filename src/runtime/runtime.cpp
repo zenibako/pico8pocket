@@ -189,6 +189,99 @@ static fix32 arg_number(lua_State *lua, int index, fix32 fallback) {
     return lua_tonumber(lua, index);
 }
 
+/*
+ * Lua allocates and frees huge numbers of small blocks (tables, closures,
+ * strings, hash parts).  musl's malloc is comparatively expensive on Pocket,
+ * so small blocks are served from per-size-class free lists carved out of
+ * larger chunks.  Lua 5.2 always passes the existing block's size as osize,
+ * which lets frees and reallocs find the right class without headers.
+ * Small blocks are recycled but never returned to malloc; that is bounded by
+ * the peak Lua heap.
+ */
+enum {
+    LUA_POOL_GRANULE = 8,
+    LUA_POOL_MAX = 256,
+    LUA_POOL_CLASSES = LUA_POOL_MAX / LUA_POOL_GRANULE,
+    LUA_POOL_CHUNK = 64 * 1024
+};
+
+typedef struct lua_pool_block {
+    struct lua_pool_block *next;
+} lua_pool_block_t;
+
+static lua_pool_block_t *lua_pool_free[LUA_POOL_CLASSES];
+static uint8_t *lua_pool_cursor;
+static size_t lua_pool_remaining;
+
+static inline size_t lua_pool_class(size_t size) {
+    return (size - 1) / LUA_POOL_GRANULE;
+}
+
+static void *lua_pool_take(size_t size) {
+    if (size > LUA_POOL_MAX)
+        return malloc(size);
+    size_t index = lua_pool_class(size);
+    lua_pool_block_t *block = lua_pool_free[index];
+    if (block) {
+        lua_pool_free[index] = block->next;
+        return block;
+    }
+    size_t rounded = (index + 1) * LUA_POOL_GRANULE;
+    if (lua_pool_remaining < rounded) {
+        /* The unused tail of the previous chunk is simply abandoned. */
+        uint8_t *chunk = (uint8_t *)malloc(LUA_POOL_CHUNK);
+        if (!chunk)
+            return NULL;
+        lua_pool_cursor = chunk;
+        lua_pool_remaining = LUA_POOL_CHUNK;
+    }
+    void *result = lua_pool_cursor;
+    lua_pool_cursor += rounded;
+    lua_pool_remaining -= rounded;
+    return result;
+}
+
+static void lua_pool_give(void *pointer, size_t size) {
+    if (size > LUA_POOL_MAX) {
+        free(pointer);
+        return;
+    }
+    lua_pool_block_t *block = (lua_pool_block_t *)pointer;
+    size_t index = lua_pool_class(size);
+    block->next = lua_pool_free[index];
+    lua_pool_free[index] = block;
+}
+
+static void *lua_pool_alloc(void *, void *pointer, size_t old_size,
+                            size_t new_size) {
+    if (!pointer) {
+        /* old_size is a type tag here, not a size. */
+        return new_size ? lua_pool_take(new_size) : NULL;
+    }
+    if (new_size == 0) {
+        lua_pool_give(pointer, old_size);
+        return NULL;
+    }
+    if (old_size > LUA_POOL_MAX && new_size > LUA_POOL_MAX)
+        return realloc(pointer, new_size);
+    if (old_size <= LUA_POOL_MAX && new_size <= LUA_POOL_MAX &&
+        lua_pool_class(old_size) == lua_pool_class(new_size))
+        return pointer;
+    void *moved = lua_pool_take(new_size);
+    if (!moved)
+        return NULL;  /* Lua keeps the original block on failure. */
+    memcpy(moved, pointer, old_size < new_size ? old_size : new_size);
+    lua_pool_give(pointer, old_size);
+    return moved;
+}
+
+static int lua_pool_panic(lua_State *lua) {
+    /* Matches luaL_newstate's handler; Lua aborts after it returns. */
+    fprintf(stderr, "PANIC: unprotected error in call to Lua API (%s)\n",
+            lua_tostring(lua, -1));
+    return 0;
+}
+
 static void push_int(lua_State *lua, int32_t value) {
     lua_pushnumber(lua, fix32(value));
 }
@@ -297,8 +390,10 @@ static void draw_state_from_ram(p8p_runtime_t *runtime) {
     update_palette_default_flags(runtime);
     runtime->clip_x0 = runtime->ram[0x5f20];
     runtime->clip_y0 = runtime->ram[0x5f21];
-    runtime->clip_x1 = runtime->ram[0x5f22];
-    runtime->clip_y1 = runtime->ram[0x5f23];
+    /* Poked clip bounds can exceed the screen; every renderer trusts the
+     * clip rectangle to stay inside the 128x128 framebuffer. */
+    runtime->clip_x1 = runtime->ram[0x5f22] > 128 ? 128 : runtime->ram[0x5f22];
+    runtime->clip_y1 = runtime->ram[0x5f23] > 128 ? 128 : runtime->ram[0x5f23];
     runtime->draw_color = runtime->ram[0x5f25];
     runtime->cursor_x = runtime->ram[0x5f26];
     runtime->cursor_y = runtime->ram[0x5f27];
@@ -441,15 +536,33 @@ static void draw_line(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,
     }
 }
 
+static void blit_tile(p8p_runtime_t *runtime, int sprite, int screen_x,
+                      int screen_y, int sprite_base);
+
 static P8P_FASTTEXT void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
                                      int y, int width, int height, int flip_x,
                                      int flip_y) {
     profile_api(P8P_API_SPRITE);
+    int sprite_base = (int)runtime->ram[0x5f54] << 8;
+    /* Unflipped 8x8-tile sprites that stay inside the sheet are exactly the
+     * map tile case; reuse its unpacked two-pixels-per-byte blitter. */
+    if (!flip_x && !flip_y && sprite >= 0 && sprite < 256 &&
+        width >= 1 && height >= 1 &&
+        (sprite & 15) + width <= 16 && (sprite >> 4) + height <= 16 &&
+        sprite_base + 8192 <= 0x10000) {
+        int screen_x = x - runtime->camera_x;
+        int screen_y = y - runtime->camera_y;
+        for (int tile_y = 0; tile_y < height; ++tile_y)
+            for (int tile_x = 0; tile_x < width; ++tile_x)
+                blit_tile(runtime, sprite + tile_x + tile_y * 16,
+                          screen_x + tile_x * 8, screen_y + tile_y * 8,
+                          sprite_base);
+        return;
+    }
     int source_x = (sprite & 15) * 8;
     int source_y = (sprite >> 4) * 8;
     int pixel_width = width * 8;
     int pixel_height = height * 8;
-    int sprite_base = (int)runtime->ram[0x5f54] << 8;
 
     int destination_x = x - runtime->camera_x;
     int destination_y = y - runtime->camera_y;
@@ -927,9 +1040,8 @@ static int api_fset(lua_State *lua) {
  * Keep that hot path separate from the fully general scaled/flipped sprite
  * renderer so it does not rebuild the same width, height and camera state for
  * every cell. */
-static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
-                          int screen_x, int screen_y, int sprite_base) {
-    profile_api(P8P_API_SPRITE);
+static void blit_tile(p8p_runtime_t *runtime, int sprite,
+                      int screen_x, int screen_y, int sprite_base) {
     int start_x = screen_x < runtime->clip_x0 ?
         runtime->clip_x0 - screen_x : 0;
     int start_y = screen_y < runtime->clip_y0 ?
@@ -985,6 +1097,12 @@ static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
             }
         }
     }
+}
+
+static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
+                          int screen_x, int screen_y, int sprite_base) {
+    profile_api(P8P_API_SPRITE);
+    blit_tile(runtime, sprite, screen_x, screen_y, sprite_base);
 }
 
 static int api_map(lua_State *lua) {
@@ -1538,7 +1656,11 @@ static uint16_t glyph_bits(uint8_t character) {
 static int api_print(lua_State *lua) {
     profile_api(P8P_API_TEXT);
     size_t text_length = 0;
-    const char *text = luaL_tolstring(lua, 1, &text_length);
+    /* Strings need no conversion; luaL_tolstring would still probe for a
+     * __tostring metamethod and push a copy. */
+    int converted = lua_type(lua, 1) != LUA_TSTRING;
+    const char *text = converted ? luaL_tolstring(lua, 1, &text_length)
+                                 : lua_tolstring(lua, 1, &text_length);
     int x = arg_int(lua, 2, active_runtime->cursor_x);
     int y = arg_int(lua, 3, active_runtime->cursor_y);
     int origin_x = x;
@@ -1555,17 +1677,41 @@ static int api_print(lua_State *lua) {
             continue;
         }
         uint16_t bits = glyph_bits(character);
-        for (int row = 0; row < 5; ++row)
-            for (int column = 0; column < 3; ++column)
-                if (bits & (1u << (14 - row * 3 - column)))
-                    screen_set(active_runtime, x + column, y + row, color);
+        p8p_runtime_t *runtime = active_runtime;
+        int screen_x = x - runtime->camera_x;
+        int screen_y = y - runtime->camera_y;
+        if (!bits) {
+            /* Blank glyph: nothing to draw. */
+        } else if (!runtime->fill_pattern &&
+                   screen_x >= runtime->clip_x0 &&
+                   screen_x + 3 <= runtime->clip_x1 &&
+                   screen_y >= runtime->clip_y0 &&
+                   screen_y + 5 <= runtime->clip_y1) {
+            /* Fully visible and unpatterned: screen_set() would resolve the
+             * same camera, palette and clip for every lit pixel. */
+            uint8_t mapped = runtime->draw_palette[color & 15] & 15;
+            uint8_t *row_start = runtime->framebuffer + screen_y * 128 + screen_x;
+            for (int row = 0; row < 5; ++row, row_start += 128) {
+                unsigned row_bits = (bits >> (12 - row * 3)) & 7u;
+                if (row_bits & 4u) row_start[0] = mapped;
+                if (row_bits & 2u) row_start[1] = mapped;
+                if (row_bits & 1u) row_start[2] = mapped;
+            }
+            runtime->screen_ram_dirty = 1;
+        } else {
+            for (int row = 0; row < 5; ++row)
+                for (int column = 0; column < 3; ++column)
+                    if (bits & (1u << (14 - row * 3 - column)))
+                        screen_set(runtime, x + column, y + row, color);
+        }
         x += 4;
     }
     if (x - origin_x > max_width) max_width = x - origin_x;
     active_runtime->cursor_x = origin_x;
     active_runtime->cursor_y = y + 6;
     cursor_to_ram(active_runtime);
-    lua_pop(lua, 1);
+    if (converted)
+        lua_pop(lua, 1);
     push_int(lua, max_width);
     return 1;
 }
@@ -2056,7 +2202,9 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->frame_count = 0;
     runtime->buttons = runtime->previous_buttons = 0;
     memset(runtime->held_frames, 0, sizeof(runtime->held_frames));
-    runtime->lua = luaL_newstate();
+    runtime->lua = lua_newstate(lua_pool_alloc, NULL);
+    if (runtime->lua)
+        lua_atpanic(runtime->lua, lua_pool_panic);
     if (!runtime->lua) {
         snprintf(runtime->error, sizeof(runtime->error), "cannot create z8lua state");
         return -2;
@@ -2084,6 +2232,11 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     lua_getfield(runtime->lua, -1, "__p8p_load");
     runtime->restore_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     lua_pop(runtime->lua, 1);
+    /* PICO-8 has no debug library, and carts such as Tetyis use a global
+     * named debug as their own flag.  Hide it only after Eris has numbered
+     * the built-ins so state files keep the same permanent-object IDs. */
+    lua_pushnil(runtime->lua);
+    lua_setglobal(runtime->lua, "debug");
     runtime->cart_thread = lua_newthread(runtime->lua);
     runtime->cart_thread_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     runtime->cart_thread_kind = 0;

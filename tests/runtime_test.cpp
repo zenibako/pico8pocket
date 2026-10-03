@@ -204,7 +204,8 @@ int main(void) {
         "function _draw() cls() memset(0,3,20000)\n"
         "local n=select('#',peek(0,20000))\n"
         "local s=chr(peek(0,9000))\n"
-        "if n==20000 and #s==9000 and ord(s,9000)==3 then pset(3,0,7) end end\n";
+        "if n==20000 and #s==9000 and ord(s,9000)==3 then pset(3,0,7) end\n"
+        "if debug==nil then pset(4,0,7) end end\n";
     CHECK(p8p_cart_load_text_memory(memory_limits_source,
                                     sizeof(memory_limits_source) - 1,
                                     &memory_limits_cart) == 0);
@@ -398,6 +399,7 @@ int main(void) {
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[3] == 7);
+        CHECK(p8p_runtime_framebuffer(runtime)[4] == 7);
 
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);

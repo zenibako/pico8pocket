@@ -20,6 +20,21 @@
   per-frame lookup table and writes two doubled source pixels per 32-bit store,
   halving framebuffer stores and removing the per-pixel palette branch.
 - Host runtime tests build with GCC as well as Clang.
+- Unflipped `spr()` calls share `map()`'s unpacked 8×8 tile blitter instead
+  of the general per-pixel sprite path, and fully visible `print()` glyphs
+  write their pixels directly. String arguments to `print()` skip the
+  `tostring` conversion. Rendered frames are byte-identical.
+- Lua's many small allocations are served from size-class free lists instead
+  of musl's `malloc`.
+- The Lua `debug` library is no longer visible to cartridges. PICO-8 has no
+  such global, and Tetyis printed its table address on screen because of it.
+  Existing save states remain compatible.
+- Clip bounds poked into draw-state RAM are clamped to the screen, so they
+  can no longer make renderers write past the framebuffer.
+
+Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
+piece and ghost piece ten times per frame (a misplaced `end`). Together, these
+changes cut host instructions per gameplay frame by 14%.
 
 ## 0.0.32 — 2026-08-22
 
