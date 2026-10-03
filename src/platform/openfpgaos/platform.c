@@ -120,17 +120,31 @@ void p8p_platform_present(const uint8_t *framebuffer, const uint8_t *palette) {
         }
         /* The known-good Pocket mode always gives us a 2x viewport. */
         if (viewport.scale == 2) {
+            /* Resolve the palette and horizontal doubling once per frame,
+             * then emit two doubled source pixels per 32-bit store. */
+            uint32_t doubled[256];
+            for (int index = 0; index < 256; ++index) {
+                uint32_t color = palette ? palette[index & 15] : (uint32_t)index;
+                doubled[index] = color | (color << 8);
+            }
+            uint8_t *first_row = dest +
+                (uint32_t)viewport.y * active_mode.stride + viewport.x;
+            int aligned = (((uintptr_t)first_row | active_mode.stride) & 3u) == 0;
             for (int source_y = 0; source_y < P8P_SCREEN_HEIGHT; ++source_y) {
-                uint8_t *row0 = dest +
-                    (uint32_t)(viewport.y + source_y * 2) * active_mode.stride +
-                    viewport.x;
-                uint16_t *pairs = (uint16_t *)row0;
+                uint8_t *row0 = first_row +
+                    (uint32_t)(source_y * 2) * active_mode.stride;
                 const uint8_t *source = framebuffer +
                     (uint32_t)source_y * P8P_SCREEN_WIDTH;
-                for (int source_x = 0; source_x < P8P_SCREEN_WIDTH; ++source_x) {
-                    uint16_t color = palette ?
-                        palette[source[source_x] & 15] : source[source_x];
-                    pairs[source_x] = (uint16_t)(color | (color << 8));
+                if (aligned) {
+                    uint32_t *quads = (uint32_t *)row0;
+                    for (int source_x = 0; source_x < P8P_SCREEN_WIDTH;
+                         source_x += 2)
+                        quads[source_x >> 1] = doubled[source[source_x]] |
+                            (doubled[source[source_x + 1]] << 16);
+                } else {
+                    uint16_t *pairs = (uint16_t *)row0;
+                    for (int source_x = 0; source_x < P8P_SCREEN_WIDTH; ++source_x)
+                        pairs[source_x] = (uint16_t)doubled[source[source_x]];
                 }
                 memcpy(row0 + active_mode.stride, row0,
                        P8P_SCREEN_WIDTH * 2);

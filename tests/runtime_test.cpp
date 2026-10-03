@@ -97,6 +97,7 @@ int main(void) {
     p8p_cart_t runaway_cart = {};
     p8p_cart_t run_cart = {};
     p8p_cart_t env_fallback_cart = {};
+    p8p_cart_t memory_limits_cart = {};
     p8p_runtime_t *runtime;
     const uint8_t *framebuffer;
     const uint8_t *screen_palette;
@@ -198,6 +199,15 @@ int main(void) {
     CHECK(p8p_cart_load_text_memory(env_fallback_source,
                                     sizeof(env_fallback_source) - 1,
                                     &env_fallback_cart) == 0);
+    static const uint8_t memory_limits_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _draw() cls() memset(0,3,20000)\n"
+        "local n=select('#',peek(0,20000))\n"
+        "local s=chr(peek(0,9000))\n"
+        "if n==20000 and #s==9000 and ord(s,9000)==3 then pset(3,0,7) end end\n";
+    CHECK(p8p_cart_load_text_memory(memory_limits_source,
+                                    sizeof(memory_limits_source) - 1,
+                                    &memory_limits_cart) == 0);
     runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
     if (runtime) {
@@ -384,6 +394,11 @@ int main(void) {
         CHECK(p8p_runtime_step(runtime, 0) == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[2] == 7);
 
+        loaded = p8p_runtime_load(runtime, &memory_limits_cart);
+        CHECK(loaded == 0);
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[3] == 7);
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)
@@ -444,6 +459,7 @@ int main(void) {
     p8p_cart_destroy(&runaway_cart);
     p8p_cart_destroy(&run_cart);
     p8p_cart_destroy(&env_fallback_cart);
+    p8p_cart_destroy(&memory_limits_cart);
     if (store_fd >= 0)
         unlink(store_path);
 

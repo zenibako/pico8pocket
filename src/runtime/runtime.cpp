@@ -1192,7 +1192,11 @@ static int api_peek(lua_State *lua) {
     int address = arg_int(lua, 1, 0) & 0xffff;
     int count = arg_int(lua, 2, 1);
     if (count < 1) count = 1;
-    if (count > 8192) count = 8192;
+    /* PICO-8 v0.2.5+ raised the multi-value peek limit from 8192. */
+    if (count > 32767) count = 32767;
+    /* C functions are only guaranteed LUA_MINSTACK free slots. */
+    if (!lua_checkstack(lua, count))
+        return luaL_error(lua, "peek: stack overflow");
     if (range_touches_screen(address, count))
         screen_to_ram(active_runtime);
     for (int i = 0; i < count; ++i)

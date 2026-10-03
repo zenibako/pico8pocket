@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Highlights
+
+- Moves the SDK and Pocket runtime (`os20` bitstream, `os.bin`) to the
+  openfpgaOS API 0.9.0 generation shipped with Diablo 1.1.0. The application
+  only uses the video, audio and input APIs, which are unchanged; the new
+  bitstream and kernel still need a physical Pocket regression pass.
+- Fetches Diablo as a pinned shallow, sparse Git checkout instead of a
+  GitHub-generated tarball, so builds no longer depend on tarball checksums
+  staying stable. The three runtime files remain SHA-256 pinned.
+- Backports two newer z8lua fixes: `chr()` accepts up to 32767 values like
+  PICO-8 v0.2.5+, and the obsolete `atan2(x, 0x8000)` bug emulation is gone.
+- `peek(addr, n)` now allows up to 32767 values and reserves Lua stack space
+  first. Previously any `n` above ~20 wrote past the C function's stack slots
+  and could corrupt the heap.
+- The 2× presentation pass resolves the palette and pixel doubling through a
+  per-frame lookup table and writes two doubled source pixels per 32-bit store,
+  halving framebuffer stores and removing the per-pixel palette branch.
+- Host runtime tests build with GCC as well as Clang.
+
 ## 0.0.32 — 2026-08-22
 
 Local hardware-test build.

@@ -174,15 +174,19 @@ planned in-core browser will consume an index stored beside the cards; see
 ## Upstream bases
 
 - Diablo/openfpgaOS SDK and Pocket runtime commit
-  `2687e3d0c22d659674dbc6717959a98aedd92957` (API 0.8.1, runtime source
-  `453a283`)
+  `8cb3198d50618696e07f5b49ad086a369dc57706` (API 0.9.0, the runtime
+  shipped with Diablo 1.1.0)
 - openfpgaOS SDK commit `628a12b551ac8137373c477e97466b84d153d2af`
   (license and redistribution notices)
-- Fake-08 commit `814991a2571ad3970e386cef48f3b148aa1c27b9`
+- Fake-08 commit `814991a2571ad3970e386cef48f3b148aa1c27b9`, with z8lua at
+  its submodule pin `e6928578` plus local patches (including backports of
+  newer upstream z8lua fixes)
 - PICO-8 behavior target: [official v0.2.7 manual](https://www.lexaloffle.com/dl/docs/pico-8_manual.html)
 
 These revisions are pinned by `scripts/fetch-deps.sh` so builds do not silently
-change when upstream moves.
+change when upstream moves. Diablo is fetched as a shallow, sparse Git checkout
+of the pinned commit (only `runtime/pocket`, `src/sdk` and `tools`), and the
+three Pocket runtime files are additionally verified by SHA-256.
 
 ## License and disclaimer
 
