@@ -275,6 +275,13 @@ static void *lua_pool_alloc(void *, void *pointer, size_t old_size,
     return moved;
 }
 
+/* Start a collection cycle when the heap reaches 4x the live data instead of
+ * Lua's default 2x.  Carts are capped near PICO-8's 2 MiB of Lua memory, so
+ * this costs at most a few MiB of Pocket RAM in exchange for fewer cycles. */
+#ifndef P8P_LUA_GC_PAUSE
+#define P8P_LUA_GC_PAUSE 400
+#endif
+
 static int lua_pool_panic(lua_State *lua) {
     /* Matches luaL_newstate's handler; Lua aborts after it returns. */
     fprintf(stderr, "PANIC: unprotected error in call to Lua API (%s)\n",
@@ -539,9 +546,10 @@ static void draw_line(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,
 static void blit_tile(p8p_runtime_t *runtime, int sprite, int screen_x,
                       int screen_y, int sprite_base);
 
-static P8P_FASTTEXT void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
-                                     int y, int width, int height, int flip_x,
-                                     int flip_y) {
+/* Not BRAM-resident: common sprites are handed to blit_tile(), which is. */
+static void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
+                        int y, int width, int height, int flip_x,
+                        int flip_y) {
     profile_api(P8P_API_SPRITE);
     int sprite_base = (int)runtime->ram[0x5f54] << 8;
     /* Unflipped 8x8-tile sprites that stay inside the sheet are exactly the
@@ -1040,8 +1048,9 @@ static int api_fset(lua_State *lua) {
  * Keep that hot path separate from the fully general scaled/flipped sprite
  * renderer so it does not rebuild the same width, height and camera state for
  * every cell. */
-static void blit_tile(p8p_runtime_t *runtime, int sprite,
-                      int screen_x, int screen_y, int sprite_base) {
+static P8P_FASTTEXT void blit_tile(p8p_runtime_t *runtime, int sprite,
+                                   int screen_x, int screen_y,
+                                   int sprite_base) {
     int start_x = screen_x < runtime->clip_x0 ?
         runtime->clip_x0 - screen_x : 0;
     int start_y = screen_y < runtime->clip_y0 ?
@@ -2203,8 +2212,10 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->buttons = runtime->previous_buttons = 0;
     memset(runtime->held_frames, 0, sizeof(runtime->held_frames));
     runtime->lua = lua_newstate(lua_pool_alloc, NULL);
-    if (runtime->lua)
+    if (runtime->lua) {
         lua_atpanic(runtime->lua, lua_pool_panic);
+        lua_gc(runtime->lua, LUA_GCSETPAUSE, P8P_LUA_GC_PAUSE);
+    }
     if (!runtime->lua) {
         snprintf(runtime->error, sizeof(runtime->error), "cannot create z8lua state");
         return -2;

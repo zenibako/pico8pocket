@@ -98,6 +98,7 @@ int main(void) {
     p8p_cart_t run_cart = {};
     p8p_cart_t env_fallback_cart = {};
     p8p_cart_t memory_limits_cart = {};
+    p8p_cart_t table_paths_cart = {};
     p8p_runtime_t *runtime;
     const uint8_t *framebuffer;
     const uint8_t *screen_palette;
@@ -209,6 +210,26 @@ int main(void) {
     CHECK(p8p_cart_load_text_memory(memory_limits_source,
                                     sizeof(memory_limits_source) - 1,
                                     &memory_limits_cart) == 0);
+    static const uint8_t table_paths_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _draw() cls() local ok=0\n"
+        "local log={} local p=setmetatable({},{__index=function(t,k) return 'i'..k end,"
+        "__newindex=function(t,k,v) rawset(t,k,v*2) log[#log+1]=k end})\n"
+        "if p.a=='ia' then ok+=1 end\n"
+        "p.b=3 if p.b==6 and #log==1 then ok+=1 end\n"
+        "p.b=5 if p.b==5 and #log==1 then ok+=1 end\n"
+        "local t={10,20,[0]=5,[1.5]=7,x=1} t[2]=21 t.x+=1\n"
+        "if t[1]==10 and t[2]==21 and t[0]==5 and t[1.5]==7 and t[1.25]==nil "
+        "and t.x==2 and t.y==nil then ok+=1 end\n"
+        "local str='abc' if str[2]=='b' and str[-1]=='c' then ok+=1 end\n"
+        "local o={v=4} function o:get() return self.v end if o:get()==4 then ok+=1 end\n"
+        "local function inenv(_ENV) return circfill~=nil and q==nil end\n"
+        "if inenv({}) then ok+=1 end\n"
+        "glob=1 glob+=1 if glob==2 then ok+=1 end\n"
+        "pset(ok,1,7) end\n";
+    CHECK(p8p_cart_load_text_memory(table_paths_source,
+                                    sizeof(table_paths_source) - 1,
+                                    &table_paths_cart) == 0);
     runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
     if (runtime) {
@@ -401,6 +422,11 @@ int main(void) {
         CHECK(p8p_runtime_framebuffer(runtime)[3] == 7);
         CHECK(p8p_runtime_framebuffer(runtime)[4] == 7);
 
+        loaded = p8p_runtime_load(runtime, &table_paths_cart);
+        CHECK(loaded == 0);
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[128 + 8] == 7);
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)
@@ -462,6 +488,7 @@ int main(void) {
     p8p_cart_destroy(&run_cart);
     p8p_cart_destroy(&env_fallback_cart);
     p8p_cart_destroy(&memory_limits_cart);
+    p8p_cart_destroy(&table_paths_cart);
     if (store_fd >= 0)
         unlink(store_path);
 

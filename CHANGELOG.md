@@ -32,9 +32,22 @@
 - Clip bounds poked into draw-state RAM are clamped to the screen, so they
   can no longer make renderers write past the framebuffer.
 
+- The z8lua interpreter reads and writes existing entries of plain tables
+  (string or integer keys) directly in its dispatch loop instead of calling
+  `luaV_gettable`/`luaV_settable`. Globals, fields, array elements and method
+  lookups all take this path; metatables, missing keys, string indexing and
+  the `_ENV` sandbox fallback keep the original code.
+- The Lua garbage collector waits until the heap reaches 4× the live data
+  (Lua's default is 2×) before starting a cycle.
+- `blit_tile` replaces `draw_sprite` in the 14 KiB on-chip BRAM so the larger
+  interpreter loop still fits.
+- `make deps` records the applied z8lua patch set and reapplies all patches
+  from a clean tree when it changes, instead of checking each patch alone.
+
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
-changes cut host instructions per gameplay frame by 14%.
+changes cut host instructions per gameplay frame by 26% with byte-identical
+output.
 
 ## 0.0.32 — 2026-08-22
 

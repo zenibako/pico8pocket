@@ -24,6 +24,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-rv32-performance.patch"
     "$PROJECT_ROOT/patches/z8lua-env-fallback.patch"
     "$PROJECT_ROOT/patches/z8lua-upstream-backports.patch"
+    "$PROJECT_ROOT/patches/z8lua-vm-fastpath.patch"
 )
 
 fetch_one() {
@@ -119,16 +120,27 @@ if [[ "$actual_z8lua_commit" != "$Z8LUA_COMMIT" ]]; then
 fi
 echo "z8lua: checked out $actual_z8lua_commit"
 
-for z8lua_patch in "${Z8LUA_PATCHES[@]}"; do
-    patch_name="$(basename "$z8lua_patch")"
-    if git -C "$FAKE08_DIR/libs/z8lua" apply --reverse --check \
-            "$z8lua_patch" >/dev/null 2>&1; then
-        echo "z8lua: $patch_name already applied"
-    elif git -C "$FAKE08_DIR/libs/z8lua" apply --check "$z8lua_patch"; then
-        git -C "$FAKE08_DIR/libs/z8lua" apply "$z8lua_patch"
-        echo "z8lua: applied $patch_name"
-    else
-        echo "z8lua: cannot apply $z8lua_patch" >&2
-        exit 1
-    fi
-done
+# Later patches may touch context used by earlier ones, so individual
+# reverse-apply checks are unreliable.  Record the applied patch set and
+# rebuild the pristine pinned tree whenever it changes.
+Z8LUA_DIR="$FAKE08_DIR/libs/z8lua"
+patch_stamp="$(git -C "$Z8LUA_DIR" rev-parse --absolute-git-dir)/p8p-patches"
+patch_digest="$(cat "${Z8LUA_PATCHES[@]}" | shasum -a 256 | awk '{print $1}')"
+tree_digest() {
+    git -C "$Z8LUA_DIR" diff HEAD | shasum -a 256 | awk '{print $1}'
+}
+if [[ -f "$patch_stamp" &&
+      "$(cat "$patch_stamp")" == "$patch_digest $(tree_digest)" ]]; then
+    echo "z8lua: patches already applied"
+else
+    git -C "$Z8LUA_DIR" checkout -q -- .
+    git -C "$Z8LUA_DIR" clean -q -fd
+    for z8lua_patch in "${Z8LUA_PATCHES[@]}"; do
+        if ! git -C "$Z8LUA_DIR" apply "$z8lua_patch"; then
+            echo "z8lua: cannot apply $z8lua_patch" >&2
+            exit 1
+        fi
+        echo "z8lua: applied $(basename "$z8lua_patch")"
+    done
+    printf '%s %s\n' "$patch_digest" "$(tree_digest)" > "$patch_stamp"
+fi

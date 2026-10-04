@@ -14,6 +14,11 @@ struct lua_TValue;
 struct Table;
 union TString;
 
+/* The inline table fast path is shared by several opcodes; keep one BRAM
+ * copy rather than inlining it into each handler of the BRAM-resident
+ * dispatch loop. */
+#define LUAI_VM_HOT OF_FASTTEXT
+
 OF_FASTTEXT void luaV_execute(struct lua_State *lua);
 OF_FASTTEXT int luaD_precall(struct lua_State *lua, struct lua_TValue *function,
                              int result_count);
@@ -21,14 +26,9 @@ OF_FASTTEXT void luaD_call(struct lua_State *lua, struct lua_TValue *function,
                            int result_count, int allow_yield);
 OF_FASTTEXT int luaD_poscall(struct lua_State *lua,
                              struct lua_TValue *first_result);
-OF_FASTTEXT void luaV_gettable(struct lua_State *lua,
-                               const struct lua_TValue *table,
-                               struct lua_TValue *key,
-                               struct lua_TValue *destination);
-OF_FASTTEXT void luaV_settable(struct lua_State *lua,
-                               const struct lua_TValue *table,
-                               struct lua_TValue *key,
-                               struct lua_TValue *value);
+/* luaV_gettable/luaV_settable are now only the slow path behind the inline
+ * table fast path (patches/z8lua-vm-fastpath.patch); their BRAM goes to the
+ * larger luaV_execute instead. */
 OF_FASTTEXT int luaV_equalobj_(struct lua_State *lua,
                                const struct lua_TValue *left,
                                const struct lua_TValue *right);
