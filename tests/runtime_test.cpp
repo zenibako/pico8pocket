@@ -651,6 +651,33 @@ int main(void) {
             p8p_cart_destroy(&flip_loop_cart);
         }
 
+        {
+            /* Loading a state discards a frame suspended in flip(): the
+             * resumed frame would see t == 1 against the restored a == 1. */
+            static const char flip_state_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "a=0 function _update()\n"
+                "local t=a a+=1 flip() if t~=a-1 then pset(5,5,8) end end\n"
+                "function _draw() end\n";
+            p8p_cart_t flip_state_cart = {};
+            void *state = NULL;
+            size_t state_size = 0;
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)flip_state_source,
+                                            sizeof(flip_state_source) - 1,
+                                            &flip_state_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &flip_state_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_save_state(runtime, &state, &state_size) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_load_state(runtime, state, state_size) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[5 * 128 + 5] != 8);
+            free(state);
+            p8p_cart_destroy(&flip_state_cart);
+        }
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)

@@ -3091,6 +3091,10 @@ extern "C" int p8p_runtime_load_state(p8p_runtime_t *runtime,
     if (p8p_audio_load_state(runtime->audio, runtime->ram, audio,
                              header.audio_size) != 0)
         return -5;
+    /* A frame suspended in flip() belongs to the pre-load state; start the
+     * next frame afresh instead of resuming it. */
+    if (runtime->cart_thread_active && runtime->cart_thread_kind == 2)
+        release_cart_thread(runtime);
     return 0;
 }
 
