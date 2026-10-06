@@ -204,26 +204,46 @@ static void install_service_hook(p8p_runtime_t *runtime) {
                     LUA_MASKCOUNT, 8192);
 }
 
+/* Arguments are read straight from the C function's stack frame: about
+ * 1,900 Lua -> API calls a frame in carts like Celeste made the generic
+ * lua_gettop/lua_type/lua_tonumberx calls a measurable cost. */
+static inline int arg_count(lua_State *lua) {
+    return (int)(lua->top - (lua->ci->func + 1));
+}
+
+static inline const TValue *arg_value(lua_State *lua, int index) {
+    StkId slot = lua->ci->func + index;
+    return slot < lua->top ? slot : NULL;
+}
+
 static int32_t arg_int(lua_State *lua, int index, int32_t fallback) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return fallback;
+    if (ttisnumber(value))
+        return (int32_t)nvalue(value);
     return (int32_t)lua_tonumber(lua, index);
 }
 
 /* A colour argument to a drawing call also becomes the pen colour, as in
  * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
 static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return runtime->draw_color;
-    int32_t color = (int32_t)lua_tonumber(lua, index);
+    int32_t color = ttisnumber(value) ? (int32_t)nvalue(value) :
+                                        (int32_t)lua_tonumber(lua, index);
     runtime->draw_color = color & 255;
     runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
     return color;
 }
 
 static fix32 arg_number(lua_State *lua, int index, fix32 fallback) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return fallback;
+    if (ttisnumber(value))
+        return nvalue(value);
     return lua_tonumber(lua, index);
 }
 
@@ -805,7 +825,7 @@ static int api_sset(lua_State *lua) {
 static int api_color(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     int previous = active_runtime->draw_color;
-    if (lua_gettop(lua) >= 1)
+    if (arg_count(lua) >= 1)
         active_runtime->draw_color = arg_int(lua, 1, 6) & 255;
     active_runtime->ram[0x5f25] = (uint8_t)active_runtime->draw_color;
     push_int(lua, previous);
@@ -1154,7 +1174,7 @@ static int api_fget(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int sprite = (int32_t)lua_tonumber(lua, 1) & 255;
     uint8_t flags = active_runtime->ram[0x3000 + sprite];
-    if (lua_gettop(lua) < 2) {
+    if (arg_count(lua) < 2) {
         push_int(lua, flags);
     } else {
         int flag = (int32_t)lua_tonumber(lua, 2) & 7;
@@ -1166,7 +1186,7 @@ static int api_fget(lua_State *lua) {
 static int api_fset(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int sprite = arg_int(lua, 1, 0) & 255;
-    if (lua_gettop(lua) < 3) {
+    if (arg_count(lua) < 3) {
         active_runtime->ram[0x3000 + sprite] = (uint8_t)arg_int(lua, 2, 0);
     } else {
         int flag = arg_int(lua, 2, 0) & 7;
@@ -1311,7 +1331,7 @@ static int api_clip(lua_State *lua) {
     int old_x1 = runtime->clip_x1;
     int old_y0 = runtime->clip_y0;
     int old_y1 = runtime->clip_y1;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         runtime->clip_x0 = runtime->clip_y0 = 0;
         runtime->clip_x1 = runtime->clip_y1 = 128;
     } else {
@@ -1349,7 +1369,7 @@ static void reset_transparency(p8p_runtime_t *runtime) {
 static int api_pal(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         /* Like PICO-8, pal() also resets transparency to palt(). */
         if (!runtime->palettes_default) {
             for (int i = 0; i < 16; ++i) {
@@ -1401,9 +1421,9 @@ static int api_pal(lua_State *lua) {
 static int api_palt(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         reset_transparency(runtime);
-    } else if (lua_gettop(lua) == 1) {
+    } else if (arg_count(lua) == 1) {
         /* palt(bitfield): bit 15-i makes colour i transparent. */
         int bits = arg_int(lua, 1, 0) & 0xffff;
         for (int color = 0; color < 16; ++color) {
@@ -1416,7 +1436,7 @@ static int api_palt(lua_State *lua) {
     } else {
         int color = arg_int(lua, 1, 0) & 15;
         uint8_t transparent =
-            (uint8_t)(lua_gettop(lua) < 2 || lua_toboolean(lua, 2));
+            (uint8_t)(arg_count(lua) < 2 || lua_toboolean(lua, 2));
         if (runtime->transparent[color] != transparent) {
             runtime->transparent[color] = transparent;
             runtime->transparency_default = 0;
@@ -1429,7 +1449,7 @@ static int api_palt(lua_State *lua) {
 
 static int api_btn(lua_State *lua) {
     profile_api(P8P_API_INPUT);
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         push_int(lua, active_runtime->buttons & 0x7f);
     } else {
         int button = arg_int(lua, 1, 0);
@@ -1456,7 +1476,7 @@ static int btnp_fires(const p8p_runtime_t *runtime, uint16_t held) {
 static int api_btnp(lua_State *lua) {
     profile_api(P8P_API_INPUT);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         int mask = 0;
         for (int button = 0; button < 7; ++button)
             if (btnp_fires(runtime, runtime->held_frames[button]))
@@ -1494,7 +1514,7 @@ static int api_peek(lua_State *lua) {
 static int api_poke(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int address = arg_int(lua, 1, 0) & 0xffff;
-    int values = lua_gettop(lua) - 1;
+    int values = arg_count(lua) - 1;
     if (values < 1)
         values = 1;
     for (int i = 0; i < values; ++i)
@@ -1733,8 +1753,8 @@ static int api_cursor(lua_State *lua) {
     profile_api(P8P_API_TEXT);
     int old_x = active_runtime->cursor_x;
     int old_y = active_runtime->cursor_y;
-    if (lua_gettop(lua) >= 1) active_runtime->cursor_x = arg_int(lua, 1, old_x);
-    if (lua_gettop(lua) >= 2) active_runtime->cursor_y = arg_int(lua, 2, old_y);
+    if (arg_count(lua) >= 1) active_runtime->cursor_x = arg_int(lua, 1, old_x);
+    if (arg_count(lua) >= 2) active_runtime->cursor_y = arg_int(lua, 2, old_y);
     cursor_to_ram(active_runtime);
     push_int(lua, old_x);
     push_int(lua, old_y);
@@ -1914,7 +1934,7 @@ static int api_print(lua_State *lua) {
     int converted = lua_type(lua, 1) != LUA_TSTRING;
     const uint8_t *text = (const uint8_t *)(converted ?
         luaL_tolstring(lua, 1, &length) : lua_tolstring(lua, 1, &length));
-    int arguments = lua_gettop(lua) - converted;
+    int arguments = arg_count(lua) - converted;
     int x = runtime->cursor_x, y = runtime->cursor_y;
     if (arguments == 2) {
         /* print(str, col) */
@@ -2438,7 +2458,7 @@ static int api_all_next(lua_State *lua) {
 
 static int api_all(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    if (lua_gettop(lua) >= 1)
+    if (arg_count(lua) >= 1)
         lua_pushvalue(lua, 1);
     else
         lua_pushnil(lua);

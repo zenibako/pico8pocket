@@ -1,0 +1,79 @@
+Call light C functions from OP_CALL without luaD_precall.
+
+PICO-8 carts call API functions (spr, pal, flr, peek, ...) thousands of
+times per frame; each went through luaD_precall's type switch and large
+prologue and then luaD_poscall.  luaD_callcfast does the same work for a
+light C function when no call, return or line hook is set; other calls
+keep luaD_precall.  Yields and errors still leave by longjmp.
+
+diff --git a/ldo.c b/ldo.c
+--- a/ldo.c
++++ b/ldo.c
+@@ -359,6 +359,38 @@
+ }
+ 
+ 
++/*
++** Pico8Pocket: call a light C function from OP_CALL when no call, return
++** or line hooks are set -- the C half of luaD_precall plus a hook-free
++** luaD_poscall, without the type switch.  PICO-8 carts make thousands of
++** such calls (spr, pal, flr, ...) per frame.  Yields and errors leave by
++** longjmp exactly as through luaD_precall.
++*/
++void luaD_callcfast (lua_State *L, StkId func, int nresults) {
++  lua_CFunction f = fvalue(func);
++  ptrdiff_t funcr = savestack(L, func);
++  CallInfo *ci;
++  StkId res, first;
++  int n, i;
++  luaD_checkstack(L, LUA_MINSTACK);  /* ensure minimum stack size */
++  ci = next_ci(L);  /* now 'enter' new function */
++  ci->nresults = nresults;
++  ci->func = restorestack(L, funcr);
++  ci->top = L->top + LUA_MINSTACK;
++  ci->callstatus = 0;
++  luaC_checkGC(L);
++  n = (*f)(L);  /* do the actual call */
++  first = L->top - n;
++  res = ci->func;  /* re-read: the stack may have moved */
++  L->ci = ci->previous;  /* back to caller */
++  for (i = nresults; i != 0 && first < L->top; i--)
++    setobjs2s(L, res++, first++);
++  while (i-- > 0)
++    setnilvalue(res++);
++  L->top = res;
++}
++
++
+ int luaD_poscall (lua_State *L, StkId firstResult) {
+   StkId res;
+   int wanted, i;
+diff --git a/ldo.h b/ldo.h
+--- a/ldo.h
++++ b/ldo.h
+@@ -35,6 +35,7 @@
+ LUAI_FUNC int luaD_pcall (lua_State *L, Pfunc func, void *u,
+                                         ptrdiff_t oldtop, ptrdiff_t ef);
+ LUAI_FUNC int luaD_poscall (lua_State *L, StkId firstResult);
++LUAI_FUNC void luaD_callcfast (lua_State *L, StkId func, int nresults);
+ LUAI_FUNC void luaD_reallocstack (lua_State *L, int newsize);
+ LUAI_FUNC void luaD_growstack (lua_State *L, int n);
+ LUAI_FUNC void luaD_shrinkstack (lua_State *L);
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -917,7 +917,13 @@
+         int b = GETARG_B(i);
+         int nresults = GETARG_C(i) - 1;
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+-        if (luaD_precall(L, ra, nresults)) {  /* C function? */
++        if (ttislcf(ra) &&
++            !(L->hookmask & (LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE))) {
++          luaD_callcfast(L, ra, nresults);  /* light C function, no hooks */
++          if (nresults >= 0) L->top = ci->top;  /* adjust results */
++          base = ci->u.l.base;
++        }
++        else if (luaD_precall(L, ra, nresults)) {  /* C function? */
+           if (nresults >= 0) L->top = ci->top;  /* adjust results */
+           base = ci->u.l.base;
+         }

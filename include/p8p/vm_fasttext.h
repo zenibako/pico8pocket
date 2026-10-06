@@ -26,6 +26,8 @@ OF_FASTTEXT void luaD_call(struct lua_State *lua, struct lua_TValue *function,
                            int result_count, int allow_yield);
 OF_FASTTEXT int luaD_poscall(struct lua_State *lua,
                              struct lua_TValue *first_result);
+OF_FASTTEXT void luaD_callcfast(struct lua_State *lua,
+                                struct lua_TValue *function, int result_count);
 /* luaV_gettable/luaV_settable are now only the slow path behind the inline
  * table fast path (patches/z8lua-vm-fastpath.patch); their BRAM goes to the
  * larger luaV_execute instead. */

@@ -46,6 +46,12 @@
   read from the registry's globals slot. Celeste 2 does about 360 such
   lookups per frame and needs 4.4% fewer host instructions per frame; the
   smaller interpreter loop frees about 760 bytes of BRAM.
+- PICO-8 API calls cost less: arguments are read straight from the Lua
+  stack instead of through `lua_gettop`/`lua_type`/`lua_tonumberx`, and the
+  interpreter calls light C functions through a short dedicated path when no
+  call or return hooks are set. Celeste 2 makes about 1,900 such calls per
+  frame; together with the sandbox change it needs 9.4% fewer host
+  instructions per frame than before, Moss Moss 2.7% fewer.
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
