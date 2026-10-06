@@ -11,6 +11,7 @@
 static int failures;
 static int service_hook_calls;
 static int inject_pause;
+static int inject_live = -1;
 static p8p_runtime_t *service_hook_runtime;
 static int profile_event_calls[4];
 
@@ -18,6 +19,8 @@ static void count_service_hook(void *) {
     ++service_hook_calls;
     if (inject_pause && service_hook_runtime)
         p8p_runtime_set_live_buttons(service_hook_runtime, 1u << 6);
+    if (inject_live >= 0 && service_hook_runtime)
+        p8p_runtime_set_live_buttons(service_hook_runtime, (uint8_t)inject_live);
 }
 
 static void count_profile_event(void *, p8p_runtime_profile_event_t event) {
@@ -100,6 +103,9 @@ int main(void) {
     p8p_cart_t memory_limits_cart = {};
     p8p_cart_t table_paths_cart = {};
     p8p_cart_t text_engine_cart = {};
+    p8p_cart_t tap_cart = {};
+    p8p_cart_t late_press_cart = {};
+    p8p_cart_t no_repeat_cart = {};
     p8p_runtime_t *runtime;
     const uint8_t *framebuffer;
     const uint8_t *screen_palette;
@@ -252,6 +258,31 @@ int main(void) {
     CHECK(p8p_cart_load_text_memory(text_engine_source,
                                     sizeof(text_engine_source) - 1,
                                     &text_engine_cart) == 0);
+    /* A: tap released mid-frame before the read.  B: press arriving after
+     * the btnp() check.  C: 0x5f5c=255 disables btnp() repeat. */
+    static const uint8_t tap_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "n=0 function _update60() for i=1,30000 do end\n"
+        "if btn(4) and btnp(4) then n+=1 end end\n"
+        "function _draw() cls() pset(n,0,7) end\n";
+    static const uint8_t late_press_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "m=0 function _update60() if btnp(4) then m+=1 end\n"
+        "for i=1,30000 do end end\n"
+        "function _draw() cls() pset(m,0,7) end\n";
+    static const uint8_t no_repeat_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r=0 function _init() poke(0x5f5c,255) end\n"
+        "function _update60() if btnp(4) then r+=1 end end\n"
+        "function _draw() cls() pset(r,0,7) end\n";
+    CHECK(p8p_cart_load_text_memory(tap_source, sizeof(tap_source) - 1,
+                                    &tap_cart) == 0);
+    CHECK(p8p_cart_load_text_memory(late_press_source,
+                                    sizeof(late_press_source) - 1,
+                                    &late_press_cart) == 0);
+    CHECK(p8p_cart_load_text_memory(no_repeat_source,
+                                    sizeof(no_repeat_source) - 1,
+                                    &no_repeat_cart) == 0);
     runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
     if (runtime) {
@@ -460,6 +491,29 @@ int main(void) {
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);
         }
 
+        service_hook_runtime = runtime;
+        loaded = p8p_runtime_load(runtime, &tap_cart);
+        CHECK(loaded == 0);
+        inject_live = 0;
+        CHECK(p8p_runtime_step(runtime, 1u << 4) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+
+        loaded = p8p_runtime_load(runtime, &late_press_cart);
+        CHECK(loaded == 0);
+        inject_live = 1u << 4;
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+        CHECK(p8p_runtime_step(runtime, 1u << 4) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+        inject_live = -1;
+        service_hook_runtime = NULL;
+
+        loaded = p8p_runtime_load(runtime, &no_repeat_cart);
+        CHECK(loaded == 0);
+        for (int frame = 0; frame < 40; ++frame)
+            CHECK(p8p_runtime_step(runtime, 1u << 4) == 0);
+        CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)
@@ -523,6 +577,9 @@ int main(void) {
     p8p_cart_destroy(&memory_limits_cart);
     p8p_cart_destroy(&table_paths_cart);
     p8p_cart_destroy(&text_engine_cart);
+    p8p_cart_destroy(&tap_cart);
+    p8p_cart_destroy(&late_press_cart);
+    p8p_cart_destroy(&no_repeat_cart);
     if (store_fd >= 0)
         unlink(store_path);
 

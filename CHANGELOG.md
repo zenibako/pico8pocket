@@ -75,6 +75,14 @@
   between top-ups queued (43-170 ms), so slow frames no longer drain the
   buffer and make music stutter, while fast carts keep the low latency.
 
+- Input follows PICO-8's once-per-frame sampling. The mid-frame updates that
+  keep busy-wait loops responsive may now only add buttons for `btn()`: a
+  quick tap released during a long frame is no longer dropped before the cart
+  reads it, and a press arriving after the cart's `btnp()` check fires on the
+  next frame instead of never.
+- `btnp()` honours the repeat delay and interval at `0x5f5c`/`0x5f5d`,
+  including 255 to disable repeating, as Kiloman does.
+
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
 changes cut host instructions per gameplay frame by 26% with byte-identical

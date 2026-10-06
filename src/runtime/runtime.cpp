@@ -49,6 +49,9 @@ struct p8p_runtime {
     uint8_t transparency_default;
     uint8_t buttons;
     uint8_t previous_buttons;
+    /* Buttons sampled at the start of the current frame; live updates
+     * during the frame may only add to them. */
+    uint8_t frame_buttons;
     uint16_t held_frames[7];
     uint32_t rng[2];
     int camera_x;
@@ -1399,16 +1402,26 @@ static int api_btn(lua_State *lua) {
     return 1;
 }
 
+/* 0x5f5c/0x5f5d hold the btnp() repeat delay and interval in frames; 0 means
+ * the default (15, 4) and a delay of 255 disables repeating. */
+static int btnp_fires(const p8p_runtime_t *runtime, uint16_t held) {
+    if (held == 1)
+        return 1;
+    int delay = runtime->ram[0x5f5c] ? runtime->ram[0x5f5c] : 15;
+    int interval = runtime->ram[0x5f5d] ? runtime->ram[0x5f5d] : 4;
+    if (delay == 255)
+        return 0;
+    return held > delay && (held - delay) % interval == 0;
+}
+
 static int api_btnp(lua_State *lua) {
     profile_api(P8P_API_INPUT);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
         int mask = 0;
-        for (int button = 0; button < 7; ++button) {
-            uint16_t held = runtime->held_frames[button];
-            if (held == 1 || (held > 15 && ((held - 15) & 3) == 0))
+        for (int button = 0; button < 7; ++button)
+            if (btnp_fires(runtime, runtime->held_frames[button]))
                 mask |= 1 << button;
-        }
         push_int(lua, mask);
         return 1;
     }
@@ -1416,8 +1429,7 @@ static int api_btnp(lua_State *lua) {
     int player = arg_int(lua, 2, 0);
     int pressed = 0;
     if (player == 0 && button >= 0 && button < 7) {
-        uint16_t held = runtime->held_frames[button];
-        pressed = held == 1 || (held > 15 && ((held - 15) & 3) == 0);
+        pressed = btnp_fires(runtime, runtime->held_frames[button]);
     }
     lua_pushboolean(lua, pressed);
     return 1;
@@ -2611,7 +2623,7 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     p8p_audio_reset(runtime->audio, runtime->ram);
     runtime->error[0] = '\0';
     runtime->frame_count = 0;
-    runtime->buttons = runtime->previous_buttons = 0;
+    runtime->buttons = runtime->previous_buttons = runtime->frame_buttons = 0;
     memset(runtime->held_frames, 0, sizeof(runtime->held_frames));
     runtime->lua = lua_newstate(lua_pool_alloc, NULL);
     if (runtime->lua) {
@@ -2743,15 +2755,12 @@ extern "C" void p8p_runtime_set_live_buttons(p8p_runtime_t *runtime,
                                                uint8_t buttons) {
     if (!runtime)
         return;
-    uint8_t next = buttons & 0x7f;
-    for (int button = 0; button < 7; ++button) {
-        uint8_t mask = (uint8_t)(1u << button);
-        if (!(next & mask))
-            runtime->held_frames[button] = 0;
-        else if (!(runtime->buttons & mask))
-            runtime->held_frames[button] = 1;
-    }
-    runtime->buttons = next;
+    /* PICO-8 samples input once per frame.  Mid-frame updates exist so
+     * busy-wait loops see new presses through btn(); they never drop a button
+     * the frame started with (a short tap would vanish before the cart read
+     * it) and leave btnp() timing to the next frame boundary (a press seen
+     * here after the cart's btnp() check would otherwise never register). */
+    runtime->buttons = (uint8_t)(runtime->frame_buttons | (buttons & 0x7f));
 }
 
 extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
@@ -2766,8 +2775,9 @@ extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
         memset(runtime->api_profile_calls, 0,
                sizeof(runtime->api_profile_calls));
     runtime->draw_frame = draw_frame != 0;
-    runtime->previous_buttons = runtime->buttons;
+    runtime->previous_buttons = runtime->frame_buttons;
     runtime->buttons = buttons & 0x7f;
+    runtime->frame_buttons = runtime->buttons;
     for (int i = 0; i < 7; ++i) {
         if (runtime->buttons & (1u << i)) {
             if (runtime->held_frames[i] != 0xffff)
@@ -2846,6 +2856,7 @@ static void restore_fixed_state(p8p_runtime_t *runtime,
     update_palette_default_flags(runtime);
     runtime->buttons = state->buttons;
     runtime->previous_buttons = state->previous_buttons;
+    runtime->frame_buttons = runtime->buttons;
     memcpy(runtime->held_frames, state->held_frames, sizeof(runtime->held_frames));
     runtime->held_frames[6] = 0;
     memcpy(runtime->rng, state->rng, sizeof(runtime->rng));
