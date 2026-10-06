@@ -14,9 +14,13 @@ started and how you can help improve it.
 ## Current state
 
 - Host tests cover `.p8`, current and legacy compressed `.p8.png`, ZIP
-  detection, integer scaling, P8 Lua execution and graphics/input calls. A
-  locally supplied Celeste Classic cart enables an additional 120-frame
-  acceptance test without distributing the game.
+  detection, integer scaling, P8 Lua execution and graphics/input calls.
+  Celeste is the priority test cart: a locally supplied
+  `assets/cards/celeste.p8.png` and/or `celeste_classic_2.p8.png` (never
+  committed) adds an acceptance test to `make test` (600 frames of scripted
+  play, then a mid-game save state that must replay the next 90 frames
+  exactly), and `make celeste` compares frame output and host instructions
+  per frame with the baseline recorded by `make celeste-baseline`.
 - APF launches the core through a core-specific instance descriptor in slot 0;
   the Pocket file picker binds the selected cartridge to slot 4.
 - `_init`, `_update`/`_update60` and `_draw` run at cartridge-selected 30 or

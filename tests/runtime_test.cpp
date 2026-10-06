@@ -104,6 +104,88 @@ static int test_cartdata_save(void *userdata, const char *id,
     } \
 } while (0)
 
+static uint32_t frame_hash(p8p_runtime_t *runtime) {
+    const uint8_t *framebuffer = p8p_runtime_framebuffer(runtime);
+    uint32_t hash = 2166136261u;
+    for (int pixel = 0; pixel < 128 * 128; ++pixel)
+        hash = (hash ^ framebuffer[pixel]) * 16777619u;
+    return hash;
+}
+
+/* Start presses, then deterministic pseudo-random play: walking, jumping
+ * (O) and dashing (X). */
+static uint8_t celeste_input(int frame) {
+    if (frame < 60)
+        return 0;
+    if (frame % 60 < 4 && frame < 240)
+        return (1u << 4) | (1u << 5);
+    uint32_t r = (uint32_t)frame / 12u * 2654435761u;
+    uint8_t buttons = (uint8_t)(1u << ((r >> 28) & 3u));
+    if (((r >> 20) & 7u) == 0)
+        buttons |= 1u << 4;
+    if (((r >> 12) & 15u) == 0)
+        buttons |= 1u << 5;
+    return buttons;
+}
+
+/*
+ * Celeste Classic (1 or 2) is the priority acceptance cart.  The cart is
+ * supplied locally (assets/cards/, never committed).  It must load at
+ * 30 FPS, play 600 frames of scripted input without errors while the
+ * picture changes and sound plays, and a state saved mid-game must replay
+ * the following frames exactly.
+ */
+static void celeste_acceptance(p8p_runtime_t *runtime, const char *path,
+                               p8p_cart_t *cart) {
+    enum { PLAY = 600, REPLAY = 90 };
+    uint32_t expected[REPLAY];
+    uint32_t previous = 0;
+    int changes = 0;
+    static int16_t audio[1600 * 2];
+    int64_t audio_energy = 0;
+    void *state = NULL;
+    size_t state_size = 0;
+    int loaded = p8p_runtime_load(runtime, cart);
+    if (loaded != 0)
+        fprintf(stderr, "%s load: %s\n", path, p8p_runtime_error(runtime));
+    CHECK(loaded == 0);
+    if (loaded != 0)
+        return;
+    CHECK(p8p_runtime_target_fps(runtime) == 30);
+    for (int frame = 0; frame < PLAY; ++frame) {
+        if (p8p_runtime_step(runtime, celeste_input(frame)) != 0) {
+            fprintf(stderr, "%s frame %d: %s\n", path, frame,
+                    p8p_runtime_error(runtime));
+            CHECK(!"Celeste runtime error");
+            return;
+        }
+        p8p_runtime_audio_render(runtime, audio, 1600);
+        for (int i = 0; i < 1600; ++i)
+            audio_energy += audio[i * 2] < 0 ? -audio[i * 2] : audio[i * 2];
+        uint32_t hash = frame_hash(runtime);
+        changes += hash != previous;
+        previous = hash;
+    }
+    CHECK(changes > PLAY / 4);
+    CHECK(audio_energy > 0);
+
+    CHECK(p8p_runtime_save_state(runtime, &state, &state_size) == 0);
+    for (int frame = 0; frame < REPLAY; ++frame) {
+        CHECK(p8p_runtime_step(runtime, celeste_input(PLAY + frame)) == 0);
+        expected[frame] = frame_hash(runtime);
+    }
+    CHECK(p8p_runtime_load_state(runtime, state, state_size) == 0);
+    int mismatches = 0;
+    for (int frame = 0; frame < REPLAY; ++frame) {
+        CHECK(p8p_runtime_step(runtime, celeste_input(PLAY + frame)) == 0);
+        mismatches += frame_hash(runtime) != expected[frame];
+    }
+    printf("%s: %d/%d frames changed, state %zu bytes, replay mismatches %d\n",
+           path, changes, PLAY, state_size, mismatches);
+    CHECK(mismatches == 0);
+    free(state);
+}
+
 #define TEST_NOTES_4 "21070210702107021070"
 #define TEST_NOTES_32 \
     TEST_NOTES_4 TEST_NOTES_4 TEST_NOTES_4 TEST_NOTES_4 \
@@ -151,7 +233,6 @@ int main(void) {
     p8p_cart_t cart = {};
     p8p_cart_t png_cart = {};
     p8p_cart_t legacy_cart = {};
-    p8p_cart_t celeste_cart = {};
     p8p_cart_t flip_cart = {};
     p8p_cart_t glyph_cart = {};
     p8p_cart_t nested_short_if_cart = {};
@@ -178,7 +259,6 @@ int main(void) {
     unsigned char config_readback[32];
     char store_path[] = "/tmp/pico8pocket-state-XXXXXX";
     int store_fd = mkstemp(store_path);
-    int have_celeste = 0;
 
     CHECK(store_fd >= 0);
     if (store_fd >= 0)
@@ -207,10 +287,6 @@ int main(void) {
     CHECK(p8p_cart_load_file(
         ".deps/fake-08/test/carts/test_legacypng_cart.p8.png", &legacy_cart) == 0);
     CHECK(strcmp(legacy_cart.lua, "print(\"0.1.10c\")\n") == 0);
-    have_celeste = p8p_cart_load_file("assets/cards/celeste.p8.png",
-                                     &celeste_cart) == 0;
-    if (have_celeste)
-        CHECK(celeste_cart.lua_size > 20000);
     static const uint8_t flip_source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
         "n=0 repeat n+=1 pset(n,1,8) flip() until n==3\n"
@@ -814,51 +890,23 @@ int main(void) {
             rmdir(menu_dir);
         }
 
-        if (have_celeste) {
-            loaded = p8p_runtime_load(runtime, &celeste_cart);
-            if (loaded != 0)
-                fprintf(stderr, "Celeste load: %s\n", p8p_runtime_error(runtime));
-            CHECK(loaded == 0);
-            CHECK(p8p_runtime_target_fps(runtime) == 30);
-            for (int frame = 0; frame < 120 && loaded == 0; ++frame) {
-                int step = p8p_runtime_step(runtime,
-                                           frame == 90 ? (1u << 4) : 0);
-                if (step != 0) {
-                    fprintf(stderr, "Celeste frame %d: %s\n", frame,
-                            p8p_runtime_error(runtime));
-                    loaded = step;
-                }
+        {
+            static const char *const celeste_paths[] = {
+                "assets/cards/celeste.p8.png",
+                "assets/cards/celeste_classic_2.p8.png",
+            };
+            int found = 0;
+            for (size_t i = 0; i < sizeof(celeste_paths) / sizeof(celeste_paths[0]); ++i) {
+                p8p_cart_t celeste_cart = {};
+                if (p8p_cart_load_file(celeste_paths[i], &celeste_cart) != 0)
+                    continue;
+                ++found;
+                CHECK(celeste_cart.lua_size > 20000);
+                celeste_acceptance(runtime, celeste_paths[i], &celeste_cart);
+                p8p_cart_destroy(&celeste_cart);
             }
-            CHECK(loaded == 0);
-            framebuffer = p8p_runtime_framebuffer(runtime);
-            unsigned framebuffer_sum = 0;
-            for (int pixel = 0; pixel < 128 * 128; ++pixel)
-                framebuffer_sum += framebuffer[pixel];
-            CHECK(framebuffer_sum != 0);
-            CHECK(p8p_runtime_save_state(runtime, &saved_state,
-                                         &saved_state_size) == 0);
-            if (saved_state) {
-                mz_ulong compressed_capacity = mz_compressBound(saved_state_size);
-                unsigned char *compressed =
-                    (unsigned char *)malloc((size_t)compressed_capacity);
-                CHECK(compressed != NULL);
-                if (compressed) {
-                    CHECK(mz_compress2(compressed, &compressed_capacity,
-                                       (const unsigned char *)saved_state,
-                                       saved_state_size, MZ_BEST_SPEED) == MZ_OK);
-                    printf("Celeste state: %zu raw, %lu compressed\n",
-                           saved_state_size,
-                           (unsigned long)compressed_capacity);
-                    free(compressed);
-                }
-                CHECK(p8p_runtime_step(runtime, 0) == 0);
-                CHECK(p8p_runtime_load_state(runtime, saved_state,
-                                             saved_state_size) == 0);
-                free(saved_state);
-                saved_state = NULL;
-            }
-        } else {
-            puts("Celeste acceptance test skipped (local cart not present)");
+            if (!found)
+                puts("Celeste acceptance test skipped (no local cart in assets/cards)");
         }
 
         p8p_runtime_destroy(runtime);
@@ -866,7 +914,6 @@ int main(void) {
     p8p_cart_destroy(&cart);
     p8p_cart_destroy(&png_cart);
     p8p_cart_destroy(&legacy_cart);
-    p8p_cart_destroy(&celeste_cart);
     p8p_cart_destroy(&flip_cart);
     p8p_cart_destroy(&glyph_cart);
     p8p_cart_destroy(&nested_short_if_cart);

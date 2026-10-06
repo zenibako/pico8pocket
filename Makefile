@@ -53,6 +53,13 @@ test: deps $(TEST_BIN) $(RUNTIME_TEST_BIN)
 
 compat-scan: deps $(COMPAT_SCAN_BIN)
 
+# Priority regression check on local Celeste carts (assets/cards/celeste*).
+celeste: compat-scan
+	@./scripts/celeste-check.sh
+
+celeste-baseline: compat-scan
+	@./scripts/celeste-check.sh --update
+
 pocket-elf: deps
 	$(MAKE) -C $(APP_DIR) \
 		PROJECT_ROOT=$(PROJECT_ROOT) \
@@ -77,4 +84,4 @@ clean:
 	$(MAKE) -C $(APP_DIR) clean PROJECT_ROOT=$(PROJECT_ROOT) SDK_ROOT=$(SDK_ROOT) 2>/dev/null || true
 	rm -rf $(BUILD_DIR) $(PROJECT_ROOT)/.obj
 
-.PHONY: deps test compat-scan pocket-elf pocket validate package package-local clean
+.PHONY: deps test compat-scan celeste celeste-baseline pocket-elf pocket validate package package-local clean
