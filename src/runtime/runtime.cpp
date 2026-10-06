@@ -191,17 +191,21 @@ static void runtime_service_lua_hook(lua_State *lua, lua_Debug *) {
         lua_yield(lua, 0);
 }
 
+/* The count hook counts servicepoints (jumps, loop back-edges and calls;
+ * patches/z8lua-servicepoints.patch), about one per four instructions:
+ * 2048 keeps the previous every-8192-instructions service rate (measured
+ * on Moss Moss, Kiloman and Celeste 2). */
 static void install_service_hook(p8p_runtime_t *runtime) {
     if (!runtime || !runtime->lua)
         return;
     if (runtime->service_hook)
         lua_sethook(runtime->lua, runtime_service_lua_hook,
-                    LUA_MASKCOUNT, 8192);
+                    LUA_MASKCOUNT, 2048);
     else
         lua_sethook(runtime->lua, NULL, 0, 0);
     if (runtime->cart_thread)
         lua_sethook(runtime->cart_thread, runtime_service_lua_hook,
-                    LUA_MASKCOUNT, 8192);
+                    LUA_MASKCOUNT, 2048);
 }
 
 /* Arguments are read straight from the C function's stack frame: about

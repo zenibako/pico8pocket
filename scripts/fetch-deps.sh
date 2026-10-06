@@ -33,6 +33,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-index-chain.patch"
     "$PROJECT_ROOT/patches/z8lua-sandbox-index.patch"
     "$PROJECT_ROOT/patches/z8lua-ccall-fastpath.patch"
+    "$PROJECT_ROOT/patches/z8lua-servicepoints.patch"
 )
 
 fetch_one() {

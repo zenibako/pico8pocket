@@ -52,6 +52,13 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- The interpreter checks its service hook (audio and input pumping during
+  long frames) only at jumps, loop back-edges and calls instead of before
+  every instruction, with the hook period cut from 8192 to 2048 so service
+  happens as often as before. Celeste 2 needs 12.7% fewer host instructions
+  per frame than the baseline recorded before the interpreter work. Carts that
+  split a long `_init` across frames may now reach their first frame a
+  frame or so earlier or later.
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
