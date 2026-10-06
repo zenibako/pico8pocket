@@ -706,13 +706,40 @@ int main(void) {
         }
 
         {
+            /* all(): deleting the current or other items and adding during
+             * iteration, empty and non-table arguments. */
+            static const char all_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "function run(t,f) local s=\"\" for v in all(t) do f(t,v) s..=v end return s end\n"
+                "function _draw() cls()\n"
+                "if run({1,2,3,4},function(t,v) if v==2 then del(t,v) end end)==\"1234\" then pset(0,0,7) end\n"
+                "if run({1,2,3},function(t,v) del(t,v) end)==\"123\" then pset(1,0,7) end\n"
+                "if run({1,2},function(t,v) if v==1 then add(t,9) end end)==\"129\" then pset(2,0,7) end\n"
+                "if run({5,6,7},function(t,v) if v==5 then deli(t,3) end end)==\"56\" then pset(3,0,7) end\n"
+                "local n=0 for v in all({}) do n+=1 end for v in all(nil) do n+=1 end\n"
+                "if n==0 then pset(4,0,7) end end\n";
+            p8p_cart_t all_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)all_source,
+                                            sizeof(all_source) - 1,
+                                            &all_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &all_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            for (int check = 0; check < 5; ++check) {
+                if (p8p_runtime_framebuffer(runtime)[check] != 7)
+                    fprintf(stderr, "all() check %d failed\n", check);
+                CHECK(p8p_runtime_framebuffer(runtime)[check] == 7);
+            }
+            p8p_cart_destroy(&all_cart);
+        }
+
+        {
             /* menuitem(): slots 1-5, removal, the button filter in bits 8-15,
              * O/X closing unless the callback returns true, and errors. */
             static const char menu_source[] =
                 "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
                 "s=0 last=-1\n"
                 "function _init()\n"
-                "menuitem(1,\"Music: on\",function(b) last=b if b&3>0 then s+=1 return true end end)\n"
+                "menuitem(1,\"Music: on\",function(b) last=b if b&3>0 then s+=1 return true end menuitem(1,\"Music: off\") end)\n"
                 "menuitem(2,\"gone\") menuitem(2)\n"
                 "menuitem(3|0x100,\"left \x8e/\x97\",function(b) last=b end)\n"
                 "menuitem(4,\"err\",function() error(\"boom\") end)\n"
@@ -735,9 +762,13 @@ int main(void) {
             CHECK(p8p_runtime_menu_select(runtime, 1, 2) == 1);
             CHECK(p8p_runtime_menu_select(runtime, 3, 2) == 1);
             CHECK(p8p_runtime_menu_select(runtime, 1, 112) == 0);
+            /* Relabelling from the callback keeps the callback. */
+            label = p8p_runtime_menu_item(runtime, 1);
+            CHECK(label && strcmp(label, "Music: off") == 0);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 2) == 1);
             CHECK(p8p_runtime_step(runtime, 0) == 0);
-            CHECK(p8p_runtime_framebuffer(runtime)[0] == 1);
-            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 2);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
             CHECK(p8p_runtime_menu_select(runtime, 4, 112) == -1);
             CHECK(strstr(p8p_runtime_error(runtime), "boom") != NULL);
 

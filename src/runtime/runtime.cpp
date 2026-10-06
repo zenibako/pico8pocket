@@ -6,6 +6,11 @@
 #include <lualib.h>
 #include <lauxlib.h>
 #include <fix32.h>
+/* Lua internals for the all() iterator's direct table access. */
+#include <lstate.h>
+#include <lgc.h>
+#include <ltable.h>
+#include <lvm.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -2311,8 +2316,8 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
-/* menuitem(index, [label, [callback]]) adds, replaces or (without a label)
- * removes pause-menu entry 1-5.  Bits 8-15 of index filter which button
+/* menuitem(index, [label, [callback]]) adds, replaces, relabels (no
+ * callback) or (without a label) removes pause-menu entry 1-5.  Bits 8-15 of index filter which button
  * presses reach the callback. */
 static int api_menuitem(lua_State *lua) {
     p8p_runtime_t *runtime = active_runtime;
@@ -2341,10 +2346,14 @@ static int api_menuitem(lua_State *lua) {
         }
         runtime->menu_labels[slot][used] = '\0';
         runtime->menu_filters[slot] = (uint8_t)((index >> 8) & 0xff);
-        if (lua_isfunction(lua, 3))
+        if (lua_isfunction(lua, 3)) {
             lua_pushvalue(lua, 3);
-        else
-            lua_pushnil(lua);
+        } else {
+            /* A new label alone keeps the callback, as PICO-8 does: carts
+             * relabel a toggle from inside its own callback. */
+            lua_pop(lua, 1);
+            return 0;
+        }
     } else {
         runtime->menu_labels[slot][0] = '\0';
         lua_pushnil(lua);
@@ -2384,38 +2393,43 @@ static int api_serial(lua_State *lua) {
     return 1;
 }
 
+/* all(t) iterator; upvalues are the table, the next index and the value
+ * returned last.  If that value is no longer at the index (the cart deleted
+ * it), the index stays, as in PICO-8.  This runs once per loop iteration in
+ * most carts, so it works on the table directly and computes #t only when
+ * the slot is empty. */
 static int api_all_next(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    if (!lua_istable(lua, lua_upvalueindex(1))) {
+    CClosure *closure = clCvalue(lua->ci->func);
+    TValue *table_value = &closure->upvalue[0];
+    TValue *index_value = &closure->upvalue[1];
+    TValue *previous = &closure->upvalue[2];
+    if (!ttistable(table_value)) {
         lua_pushnil(lua);
         return 1;
     }
-    int index = (int)lua_tointeger(lua, lua_upvalueindex(2));
-    lua_rawgeti(lua, lua_upvalueindex(1), index);
-    if (lua_rawequal(lua, -1, lua_upvalueindex(3))) {
-        lua_pop(lua, 1);
-        ++index;
-    } else {
-        lua_pop(lua, 1);
+    Table *table = hvalue(table_value);
+    int index;
+    lua_number2int(index, nvalue(index_value));
+    const TValue *slot = luaH_getint(table, index);
+    if (luaV_rawequalobj(slot, previous))
+        slot = luaH_getint(table, ++index);
+    if (ttisnil(slot)) {
+        int length = luaH_getn(table);
+        while (index <= length && ttisnil(slot))
+            slot = luaH_getint(table, ++index);
+        if (index > length) {
+            setnvalue(index_value, cast_num(index));
+            setnilvalue(previous);
+            lua_pushnil(lua);
+            return 1;
+        }
     }
-    int length = (int)lua_rawlen(lua, lua_upvalueindex(1));
-    while (index <= length) {
-        lua_rawgeti(lua, lua_upvalueindex(1), index);
-        if (!lua_isnil(lua, -1))
-            break;
-        lua_pop(lua, 1);
-        ++index;
-    }
-    lua_pushinteger(lua, index);
-    lua_replace(lua, lua_upvalueindex(2));
-    if (index > length) {
-        lua_pushnil(lua);
-        lua_replace(lua, lua_upvalueindex(3));
-        lua_pushnil(lua);
-        return 1;
-    }
-    lua_pushvalue(lua, -1);
-    lua_replace(lua, lua_upvalueindex(3));
+    setnvalue(index_value, cast_num(index));
+    setobj(lua, previous, slot);
+    luaC_barrier(lua, closure, slot);
+    setobj2s(lua, lua->top, slot);
+    ++lua->top;
     return 1;
 }
 

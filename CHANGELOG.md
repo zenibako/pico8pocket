@@ -22,6 +22,12 @@
   next room inside `_update` when you drop into it) could switch skipping
   off for the rest of the room at about 12 FPS. While a cart is over budget
   without skipping, one draw in 15 is now skipped to re-measure.
+- `menuitem(i, label)` without a callback relabels an entry and keeps its
+  callback, as in PICO-8. Moss Moss's colorblind toggle could be switched
+  on but not off.
+- The `all()` iterator reads the table directly and computes `#t` only at
+  empty slots instead of on every step. Moss Moss, which iterates with
+  `all()` throughout, needs about 26% fewer host instructions per frame.
 
 ## 0.0.33 — 2026-10-06
 
