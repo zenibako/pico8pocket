@@ -1,0 +1,102 @@
+Inline table access fast paths in the z8lua VM.
+
+GETTABUP, GETTABLE, SELF, SETTABUP and SETTABLE previously always called
+luaV_gettable/luaV_settable and then luaH_get's type switch.  For a plain
+table indexed by a short string or integral number whose entry already
+exists, look the slot up directly in the dispatch loop.  Missing entries,
+metamethods, string indexing and the _ENV sandbox fallback keep the
+original path.  Applies after z8lua-env-fallback.patch.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -145,6 +145,45 @@
+ }
+ 
+ 
++/*
++** Pico8Pocket: inline lookups for the common case of a plain table indexed
++** by a short string or an integral number whose entry already exists.
++** Anything else (missing entries, metamethods, string indexing, the
++** sandbox fallback) still goes through luaV_gettable/luaV_settable.
++*/
++#if !defined(LUAI_VM_HOT)
++#define LUAI_VM_HOT inline
++#endif
++
++static LUAI_VM_HOT TValue *fastslot (const TValue *t, const TValue *key) {
++  const TValue *res;
++  if (!ttistable(t)) return NULL;
++  if (ttisshrstring(key))
++    res = luaH_getstr(hvalue(t), rawtsvalue(key));
++  else if (ttisnumber(key)) {
++    int k;
++    lua_Number n = nvalue(key);
++    lua_number2int(k, n);
++    if (!luai_numeq(cast_num(k), n)) return NULL;
++    res = luaH_getint(hvalue(t), k);
++  }
++  else return NULL;
++  return ttisnil(res) ? NULL : cast(TValue *, res);
++}
++
++
++static inline int fastset (lua_State *L, const TValue *t, const TValue *key,
++                           const TValue *val) {
++  TValue *slot = fastslot(t, key);
++  if (slot == NULL) return 0;
++  /* An existing non-nil entry means no __newindex can apply. */
++  setobj2t(L, slot, val);
++  invalidateTMcache(hvalue(t));
++  luaC_barrierback(L, obj2gco(hvalue(t)), val);
++  return 1;
++}
++
++
+ void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
+   int loop;
+   for (loop = 0; loop < MAXTAGLOOP; loop++) {
+@@ -630,6 +669,8 @@
+       vmcase(OP_GETTABUP,
+         int encoded = GETARG_B(i);
+         int b = encoded & 0xff;
++        const TValue *fast = fastslot(cl->upvals[b]->v, RKC(i));
++        if (fast) { setobj2s(L, ra, fast); break; }
+         Protect(luaV_gettable(L, cl->upvals[b]->v, RKC(i), ra));
+         // ATTN: I don't think this is actually what PICO-8 does, but I'm not sure
+         // what PICO-8 is actually doing, and this appears to make carts compatible.
+@@ -654,6 +695,8 @@
+       vmcase(OP_GETTABLE,
+         int encoded = GETARG_B(i);
+         TValue *table = base + (encoded & 0xff);
++        const TValue *fast = fastslot(table, RKC(i));
++        if (fast) { setobj2s(L, ra, fast); break; }
+         Protect(luaV_gettable(L, table, RKC(i), ra));
+         // When _ENV is overridden (e.g., in a for loop), lookups use OP_GETTABLE instead of OP_GETTABUP
+         // We need to check the sandbox fallback here as well
+@@ -672,6 +715,7 @@
+       )
+       vmcase(OP_SETTABUP,
+         int a = GETARG_A(i);
++        if (fastset(L, cl->upvals[a]->v, RKB(i), RKC(i))) break;
+         Protect(luaV_settable(L, cl->upvals[a]->v, RKB(i), RKC(i)));
+       )
+       vmcase(OP_SETUPVAL,
+@@ -680,6 +724,7 @@
+         luaC_barrier(L, uv, ra);
+       )
+       vmcase(OP_SETTABLE,
++        if (fastset(L, ra, RKB(i), RKC(i))) break;
+         Protect(luaV_settable(L, ra, RKB(i), RKC(i)));
+       )
+       vmcase(OP_NEWTABLE,
+@@ -693,7 +738,9 @@
+       )
+       vmcase(OP_SELF,
+         StkId rb = RB(i);
++        const TValue *fast = fastslot(rb, RKC(i));
+         setobjs2s(L, ra+1, rb);
++        if (fast) { setobj2s(L, ra, fast); break; }
+         Protect(luaV_gettable(L, rb, RKC(i), ra));
+       )
+       vmcase(OP_ADD,

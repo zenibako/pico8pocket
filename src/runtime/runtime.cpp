@@ -1,4 +1,5 @@
 #include "p8p/runtime.h"
+#include "p8p/pico8_font.h"
 #include "p8p/audio.h"
 
 #include <lua.h>
@@ -6,6 +7,7 @@
 #include <lauxlib.h>
 #include <fix32.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,11 @@ struct p8p_runtime {
      * it, avoiding a read-modify-write for every rendered pixel. */
     uint8_t framebuffer[128 * 128];
     uint8_t screen_ram_dirty;
+    /* RAM address the framebuffer mirrors: the screen at 0x6000 unless the
+     * cart redirects drawing with 0x5f55 (e.g. into the sprite sheet). */
+    uint16_t draw_target;
+    /* Unpacked screen RAM for presentation while drawing is redirected. */
+    uint8_t display[128 * 128];
     uint8_t draw_palette[16];
     uint8_t screen_palette[16];
     uint8_t transparent[16];
@@ -42,6 +49,9 @@ struct p8p_runtime {
     uint8_t transparency_default;
     uint8_t buttons;
     uint8_t previous_buttons;
+    /* Buttons sampled at the start of the current frame; live updates
+     * during the frame may only add to them. */
+    uint8_t frame_buttons;
     uint16_t held_frames[7];
     uint32_t rng[2];
     int camera_x;
@@ -60,6 +70,7 @@ struct p8p_runtime {
     uint32_t frame_count;
     int persist_ref;
     int restore_ref;
+    int frame_ref;  /* Lua dispatcher that runs _update/_draw (registry) */
     int cart_thread_ref;
     lua_State *cart_thread;
     uint8_t cart_thread_active;
@@ -116,6 +127,11 @@ static const uint8_t runtime_state_magic[8] = {
     'P', '8', 'P', 'S', 'T', 'A', 'T', 'E'
 };
 
+static_assert(offsetof(p8p_runtime, ram) % 4 == 0,
+              "screen packing uses word access to RAM");
+static_assert(offsetof(p8p_runtime, framebuffer) % 4 == 0,
+              "screen packing uses word access to the framebuffer");
+
 static p8p_runtime_t *active_runtime;
 
 static void profile_api(p8p_runtime_api_category_t category) {
@@ -160,6 +176,7 @@ static void runtime_service_lua_hook(lua_State *lua, lua_Debug *) {
      * intentionally omit it on some paths.  Yield after a bounded instruction
      * slice so one such path cannot lock the Pocket forever. */
     if (active_runtime && lua == active_runtime->cart_thread &&
+        active_runtime->cart_thread_kind != 2 &&
         ++active_runtime->cart_instruction_slices >= 16)
         lua_yield(lua, 0);
 }
@@ -183,10 +200,121 @@ static int32_t arg_int(lua_State *lua, int index, int32_t fallback) {
     return (int32_t)lua_tonumber(lua, index);
 }
 
+/* A colour argument to a drawing call also becomes the pen colour, as in
+ * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
+static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
+    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+        return runtime->draw_color;
+    int32_t color = (int32_t)lua_tonumber(lua, index);
+    runtime->draw_color = color & 255;
+    runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
+    return color;
+}
+
 static fix32 arg_number(lua_State *lua, int index, fix32 fallback) {
     if (lua_gettop(lua) < index || lua_isnil(lua, index))
         return fallback;
     return lua_tonumber(lua, index);
+}
+
+/*
+ * Lua allocates and frees huge numbers of small blocks (tables, closures,
+ * strings, hash parts).  musl's malloc is comparatively expensive on Pocket,
+ * so small blocks are served from per-size-class free lists carved out of
+ * larger chunks.  Lua 5.2 always passes the existing block's size as osize,
+ * which lets frees and reallocs find the right class without headers.
+ * Small blocks are recycled but never returned to malloc; that is bounded by
+ * the peak Lua heap.
+ */
+enum {
+    LUA_POOL_GRANULE = 8,
+    LUA_POOL_MAX = 256,
+    LUA_POOL_CLASSES = LUA_POOL_MAX / LUA_POOL_GRANULE,
+    LUA_POOL_CHUNK = 64 * 1024
+};
+
+typedef struct lua_pool_block {
+    struct lua_pool_block *next;
+} lua_pool_block_t;
+
+static lua_pool_block_t *lua_pool_free[LUA_POOL_CLASSES];
+static uint8_t *lua_pool_cursor;
+static size_t lua_pool_remaining;
+
+static inline size_t lua_pool_class(size_t size) {
+    return (size - 1) / LUA_POOL_GRANULE;
+}
+
+static void *lua_pool_take(size_t size) {
+    if (size > LUA_POOL_MAX)
+        return malloc(size);
+    size_t index = lua_pool_class(size);
+    lua_pool_block_t *block = lua_pool_free[index];
+    if (block) {
+        lua_pool_free[index] = block->next;
+        return block;
+    }
+    size_t rounded = (index + 1) * LUA_POOL_GRANULE;
+    if (lua_pool_remaining < rounded) {
+        /* The unused tail of the previous chunk is simply abandoned. */
+        uint8_t *chunk = (uint8_t *)malloc(LUA_POOL_CHUNK);
+        if (!chunk)
+            return NULL;
+        lua_pool_cursor = chunk;
+        lua_pool_remaining = LUA_POOL_CHUNK;
+    }
+    void *result = lua_pool_cursor;
+    lua_pool_cursor += rounded;
+    lua_pool_remaining -= rounded;
+    return result;
+}
+
+static void lua_pool_give(void *pointer, size_t size) {
+    if (size > LUA_POOL_MAX) {
+        free(pointer);
+        return;
+    }
+    lua_pool_block_t *block = (lua_pool_block_t *)pointer;
+    size_t index = lua_pool_class(size);
+    block->next = lua_pool_free[index];
+    lua_pool_free[index] = block;
+}
+
+static void *lua_pool_alloc(void *, void *pointer, size_t old_size,
+                            size_t new_size) {
+    if (!pointer) {
+        /* old_size is a type tag here, not a size. */
+        return new_size ? lua_pool_take(new_size) : NULL;
+    }
+    if (new_size == 0) {
+        lua_pool_give(pointer, old_size);
+        return NULL;
+    }
+    if (old_size > LUA_POOL_MAX && new_size > LUA_POOL_MAX)
+        return realloc(pointer, new_size);
+    if (old_size <= LUA_POOL_MAX && new_size <= LUA_POOL_MAX &&
+        lua_pool_class(old_size) == lua_pool_class(new_size))
+        return pointer;
+    void *moved = lua_pool_take(new_size);
+    if (!moved)
+        return NULL;  /* Lua keeps the original block on failure. */
+    memcpy(moved, pointer, old_size < new_size ? old_size : new_size);
+    lua_pool_give(pointer, old_size);
+    return moved;
+}
+
+/* Start a collection cycle when the heap reaches 4x the live data instead of
+ * Lua's default 2x.  Carts are capped near PICO-8's 2 MiB of Lua memory, so
+ * this costs at most a few MiB of Pocket RAM in exchange for fewer cycles. */
+#ifndef P8P_LUA_GC_PAUSE
+#define P8P_LUA_GC_PAUSE 400
+#endif
+
+static int lua_pool_panic(lua_State *lua) {
+    /* Matches luaL_newstate's handler; Lua aborts after it returns. */
+    fprintf(stderr, "PANIC: unprotected error in call to Lua API (%s)\n",
+            lua_tostring(lua, -1));
+    return 0;
 }
 
 static void push_int(lua_State *lua, int32_t value) {
@@ -201,39 +329,109 @@ static int in_clip(const p8p_runtime_t *runtime, int x, int y) {
 static void screen_to_ram(p8p_runtime_t *runtime) {
     if (!runtime->screen_ram_dirty)
         return;
-    for (int y = 0; y < 128; ++y) {
-        const uint8_t *source = runtime->framebuffer + y * 128;
-        uint8_t *destination = runtime->ram + 0x6000 + y * 64;
-        for (int x = 0; x < 64; ++x)
-            destination[x] = (uint8_t)((source[x * 2] & 15) |
-                                      ((source[x * 2 + 1] & 15) << 4));
+    /* Eight pixels per pair of word loads, one word store.  Both buffers are
+     * 4-byte aligned (see the static_asserts); telling the compiler lets
+     * RV32 use real lw/sw instead of byte accesses. */
+    const uint8_t *source =
+        (const uint8_t *)__builtin_assume_aligned(runtime->framebuffer, 4);
+    uint8_t *destination = (uint8_t *)__builtin_assume_aligned(
+        runtime->ram + runtime->draw_target, 4);
+    for (int i = 0; i < 128 * 128; i += 8) {
+        uint32_t a, b;
+        memcpy(&a, source + i, 4);
+        memcpy(&b, source + i + 4, 4);
+        a &= 0x0f0f0f0fu;
+        b &= 0x0f0f0f0fu;
+        a |= a >> 4;
+        b |= b >> 4;
+        uint32_t packed = (a & 0xff) | ((a >> 16) & 0xff) << 8 |
+                          (b & 0xff) << 16 | ((b >> 16) & 0xff) << 24;
+        memcpy(destination + i / 2, &packed, 4);
     }
     runtime->screen_ram_dirty = 0;
 }
 
 static void ram_to_screen(p8p_runtime_t *runtime) {
-    for (int y = 0; y < 128; ++y) {
-        const uint8_t *source = runtime->ram + 0x6000 + y * 64;
-        uint16_t *destination =
-            (uint16_t *)(runtime->framebuffer + y * 128);
-        for (int x = 0; x < 64; ++x) {
-            uint8_t packed = source[x];
-            destination[x] = (uint16_t)((packed & 15) |
-                                       ((uint16_t)(packed >> 4) << 8));
-        }
+    /* Two packed bytes per halfword load, four pixels per word store. */
+    const uint8_t *source = (const uint8_t *)__builtin_assume_aligned(
+        runtime->ram + runtime->draw_target, 4);
+    uint8_t *destination =
+        (uint8_t *)__builtin_assume_aligned(runtime->framebuffer, 4);
+    for (int i = 0; i < 64 * 128; i += 2) {
+        uint16_t two;
+        memcpy(&two, source + i, 2);
+        uint32_t lo = two & 0xff, hi = two >> 8;
+        uint32_t pixels = (lo & 15) | (lo >> 4) << 8 |
+                          (hi & 15) << 16 | (hi >> 4) << 24;
+        memcpy(destination + i * 2, &pixels, 4);
     }
     runtime->screen_ram_dirty = 0;
 }
 
+/* Whether a RAM range overlaps the memory the framebuffer mirrors. */
 static int range_touches_screen(int address, int length) {
     int end;
+    int start = active_runtime ? active_runtime->draw_target : 0x6000;
+    int stop = start + 0x2000;
     if (length <= 0)
         return 0;
     address &= 0xffff;
     end = address + length;
     if (end <= 0x10000)
-        return address < 0x8000 && end > 0x6000;
-    return (address < 0x8000) || ((end - 0x10000) > 0x6000);
+        return address < stop && end > start;
+    return (address < stop) || ((end - 0x10000) > start);
+}
+
+/*
+ * After RAM bytes overlapping the draw target were written, refresh only the
+ * framebuffer pixels they cover.  Writes need no prior screen_to_ram(): the
+ * framebuffer stays authoritative, the written bytes become consistent, and
+ * a pending dirty flag still covers the rest of the packed copy.
+ */
+static void ram_to_screen_range(p8p_runtime_t *runtime, int address,
+                                int length) {
+    int base = runtime->draw_target;
+    address &= 0xffff;
+    while (length > 0) {
+        int chunk = length < 0x10000 - address ? length : 0x10000 - address;
+        int start = address > base ? address : base;
+        int stop = address + chunk < base + 0x2000 ? address + chunk
+                                                   : base + 0x2000;
+        for (int i = start; i < stop; ++i) {
+            uint8_t packed = runtime->ram[i];
+            int offset = (i - base) * 2;
+            runtime->framebuffer[offset] = packed & 15;
+            runtime->framebuffer[offset + 1] = packed >> 4;
+        }
+        length -= chunk;
+        address = 0;
+    }
+}
+
+/* PICO-8 maps 0x5f55 = 0 to the sprite sheet, 0x80+ to upper memory and
+ * every other value to the screen. */
+static uint16_t draw_target_from_ram(const p8p_runtime_t *runtime) {
+    uint8_t value = runtime->ram[0x5f55];
+    if (value == 0)
+        return 0x0000;
+    if (value >= 0x80)
+        return (uint16_t)((value & 0xe0) << 8);
+    return 0x6000;
+}
+
+static void sync_draw_target(p8p_runtime_t *runtime) {
+    uint16_t target = draw_target_from_ram(runtime);
+    if (target == runtime->draw_target)
+        return;
+    screen_to_ram(runtime);
+    runtime->draw_target = target;
+    ram_to_screen(runtime);
+}
+
+/* Sprite reads come from RAM; flush pixels drawn into the sheet first. */
+static inline void flush_redirected_drawing(p8p_runtime_t *runtime) {
+    if (runtime->draw_target != 0x6000)
+        screen_to_ram(runtime);
 }
 
 static int range_touches_cartdata(int address, int length) {
@@ -242,8 +440,9 @@ static int range_touches_cartdata(int address, int length) {
     return address < 0x5f00 && address + length > 0x5e00;
 }
 
+/* Includes 0x5f55, the draw-target mapping. */
 static int range_touches_draw_state(int address, int length) {
-    return length > 0 && address < 0x5f40 && address + length > 0x5f00;
+    return length > 0 && address < 0x5f56 && address + length > 0x5f00;
 }
 
 static void draw_state_to_ram(p8p_runtime_t *runtime) {
@@ -287,7 +486,10 @@ static void camera_to_ram(p8p_runtime_t *runtime) {
     runtime->ram[0x5f2b] = (uint8_t)(runtime->camera_y >> 8);
 }
 
+static void sync_draw_target(p8p_runtime_t *runtime);
+
 static void draw_state_from_ram(p8p_runtime_t *runtime) {
+    sync_draw_target(runtime);
     for (int i = 0; i < 16; ++i) {
         runtime->draw_palette[i] = runtime->ram[0x5f00 + i] & 15;
         runtime->transparent[i] =
@@ -297,8 +499,10 @@ static void draw_state_from_ram(p8p_runtime_t *runtime) {
     update_palette_default_flags(runtime);
     runtime->clip_x0 = runtime->ram[0x5f20];
     runtime->clip_y0 = runtime->ram[0x5f21];
-    runtime->clip_x1 = runtime->ram[0x5f22];
-    runtime->clip_y1 = runtime->ram[0x5f23];
+    /* Poked clip bounds can exceed the screen; every renderer trusts the
+     * clip rectangle to stay inside the 128x128 framebuffer. */
+    runtime->clip_x1 = runtime->ram[0x5f22] > 128 ? 128 : runtime->ram[0x5f22];
+    runtime->clip_y1 = runtime->ram[0x5f23] > 128 ? 128 : runtime->ram[0x5f23];
     runtime->draw_color = runtime->ram[0x5f25];
     runtime->cursor_x = runtime->ram[0x5f26];
     runtime->cursor_y = runtime->ram[0x5f27];
@@ -385,6 +589,13 @@ static void sprite_set(p8p_runtime_t *runtime, int x, int y, uint8_t color) {
         *packed = (uint8_t)((*packed & 0x0f) | ((color & 0x0f) << 4));
     else
         *packed = (uint8_t)((*packed & 0xf0) | (color & 0x0f));
+    if (range_touches_screen(address, 1)) {
+        /* Drawing is redirected here, so the framebuffer is authoritative.
+         * Write just this pixel: unpacking the whole byte could restore a
+         * stale neighbouring pixel from RAM. */
+        runtime->framebuffer[(address - runtime->draw_target) * 2 + (x & 1)] =
+            color & 0x0f;
+    }
 }
 
 static uint8_t map_get(const p8p_runtime_t *runtime, int x, int y) {
@@ -409,12 +620,11 @@ static void map_set(p8p_runtime_t *runtime, int x, int y, uint8_t value) {
     if (x < 0 || y < 0 || x >= width || y >= height)
         return;
     int index = y * width + x;
-    if (mapping >= 0x80)
-        runtime->ram[(mapping << 8) + index] = value;
-    else if (index < 4096)
-        runtime->ram[0x2000 + index] = value;
-    else
-        runtime->ram[index] = value;
+    int address = mapping >= 0x80 ? (mapping << 8) + index :
+                  index < 4096 ? 0x2000 + index : index;
+    runtime->ram[address] = value;
+    if (range_touches_screen(address, 1))
+        ram_to_screen_range(runtime, address, 1);
 }
 
 static void draw_line(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,
@@ -441,15 +651,34 @@ static void draw_line(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,
     }
 }
 
-static P8P_FASTTEXT void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
-                                     int y, int width, int height, int flip_x,
-                                     int flip_y) {
+static void blit_tile(p8p_runtime_t *runtime, int sprite, int screen_x,
+                      int screen_y, int sprite_base);
+
+/* Not BRAM-resident: common sprites are handed to blit_tile(), which is. */
+static void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
+                        int y, int width, int height, int flip_x,
+                        int flip_y) {
     profile_api(P8P_API_SPRITE);
+    int sprite_base = (int)runtime->ram[0x5f54] << 8;
+    /* Unflipped 8x8-tile sprites that stay inside the sheet are exactly the
+     * map tile case; reuse its unpacked two-pixels-per-byte blitter. */
+    if (!flip_x && !flip_y && sprite >= 0 && sprite < 256 &&
+        width >= 1 && height >= 1 &&
+        (sprite & 15) + width <= 16 && (sprite >> 4) + height <= 16 &&
+        sprite_base + 8192 <= 0x10000) {
+        int screen_x = x - runtime->camera_x;
+        int screen_y = y - runtime->camera_y;
+        for (int tile_y = 0; tile_y < height; ++tile_y)
+            for (int tile_x = 0; tile_x < width; ++tile_x)
+                blit_tile(runtime, sprite + tile_x + tile_y * 16,
+                          screen_x + tile_x * 8, screen_y + tile_y * 8,
+                          sprite_base);
+        return;
+    }
     int source_x = (sprite & 15) * 8;
     int source_y = (sprite >> 4) * 8;
     int pixel_width = width * 8;
     int pixel_height = height * 8;
-    int sprite_base = (int)runtime->ram[0x5f54] << 8;
 
     int destination_x = x - runtime->camera_x;
     int destination_y = y - runtime->camera_y;
@@ -504,6 +733,10 @@ static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
         return;
     if (x0 < runtime->clip_x0) x0 = runtime->clip_x0;
     if (x1 >= runtime->clip_x1) x1 = runtime->clip_x1 - 1;
+    /* A clip rectangle whose left edge is past its right edge (for example
+     * clip() starting beyond the screen) is empty. */
+    if (x0 > x1)
+        return;
 
     if (!runtime->fill_pattern) {
         uint8_t mapped = runtime->draw_palette[color & 15] & 15;
@@ -533,7 +766,7 @@ static int api_pset(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     p8p_runtime_t *runtime = active_runtime;
     screen_set(runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
-               arg_int(lua, 3, runtime->draw_color));
+               arg_pen(lua, 3, runtime));
     return 0;
 }
 
@@ -546,6 +779,7 @@ static int api_pget(lua_State *lua) {
 }
 
 static int api_sget(lua_State *lua) {
+    flush_redirected_drawing(active_runtime);
     profile_api(P8P_API_GRAPHICS);
     push_int(lua, sprite_get(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0)));
     return 1;
@@ -575,7 +809,7 @@ static int api_line(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     draw_line(runtime, x0, y0, x1, y1, color);
     return 0;
 }
@@ -587,7 +821,7 @@ static int api_rectfill(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     if (y0 > y1) { int temp = y0; y0 = y1; y1 = temp; }
 
     /* Clamp in world coordinates before walking the rows.  Real cartridges
@@ -612,7 +846,7 @@ static int api_rect(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     draw_line(runtime, x0, y0, x1, y0, color);
     draw_line(runtime, x1, y0, x1, y1, color);
     draw_line(runtime, x1, y1, x0, y1, color);
@@ -626,7 +860,7 @@ static int api_circfill(lua_State *lua) {
     int cx = arg_int(lua, 1, 0);
     int cy = arg_int(lua, 2, 0);
     int radius = arg_int(lua, 3, 4);
-    int color = arg_int(lua, 4, runtime->draw_color);
+    int color = arg_pen(lua, 4, runtime);
     if (radius < 0)
         return 0;
     int extent = radius;
@@ -647,7 +881,7 @@ static int api_circ(lua_State *lua) {
     int cx = arg_int(lua, 1, 0);
     int cy = arg_int(lua, 2, 0);
     int radius = arg_int(lua, 3, 4);
-    int color = arg_int(lua, 4, runtime->draw_color);
+    int color = arg_pen(lua, 4, runtime);
     int x = radius;
     int y = 0;
     int error = 1 - radius;
@@ -672,13 +906,22 @@ static int api_circ(lua_State *lua) {
 }
 
 static int api_spr(lua_State *lua) {
-    draw_sprite(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
+    int sprite = arg_int(lua, 1, 0);
+    if (sprite < 0) {
+        /* Carts such as Kiloman use -1 as "no sprite"; PICO-8 draws nothing
+         * rather than out-of-sheet pixels. */
+        profile_api(P8P_API_SPRITE);
+        return 0;
+    }
+    flush_redirected_drawing(active_runtime);
+    draw_sprite(active_runtime, sprite, arg_int(lua, 2, 0),
                 arg_int(lua, 3, 0), arg_int(lua, 4, 1), arg_int(lua, 5, 1),
                 lua_toboolean(lua, 6), lua_toboolean(lua, 7));
     return 0;
 }
 
 static int api_sspr(lua_State *lua) {
+    flush_redirected_drawing(active_runtime);
     profile_api(P8P_API_SPRITE);
     p8p_runtime_t *runtime = active_runtime;
     int source_x = arg_int(lua, 1, 0);
@@ -813,7 +1056,7 @@ static int api_oval(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     draw_oval(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
               arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-              arg_int(lua, 5, active_runtime->draw_color), 0);
+              arg_pen(lua, 5, active_runtime), 0);
     return 0;
 }
 
@@ -821,11 +1064,12 @@ static int api_ovalfill(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     draw_oval(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
               arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-              arg_int(lua, 5, active_runtime->draw_color), 1);
+              arg_pen(lua, 5, active_runtime), 1);
     return 0;
 }
 
 static int api_tline(lua_State *lua) {
+    flush_redirected_drawing(active_runtime);
     profile_api(P8P_API_SPRITE);
     p8p_runtime_t *runtime = active_runtime;
     int x0 = arg_int(lua, 1, 0);
@@ -878,6 +1122,7 @@ static int api_tline(lua_State *lua) {
 }
 
 static int api_mget(lua_State *lua) {
+    flush_redirected_drawing(active_runtime);
     profile_api(P8P_API_MEMORY);
     /* lua_tonumber(nil) is zero, which is exactly mget()'s fallback.  BAS
      * Escape calls this hundreds of times per frame; avoiding two gettop +
@@ -927,9 +1172,9 @@ static int api_fset(lua_State *lua) {
  * Keep that hot path separate from the fully general scaled/flipped sprite
  * renderer so it does not rebuild the same width, height and camera state for
  * every cell. */
-static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
-                          int screen_x, int screen_y, int sprite_base) {
-    profile_api(P8P_API_SPRITE);
+static P8P_FASTTEXT void blit_tile(p8p_runtime_t *runtime, int sprite,
+                                   int screen_x, int screen_y,
+                                   int sprite_base) {
     int start_x = screen_x < runtime->clip_x0 ?
         runtime->clip_x0 - screen_x : 0;
     int start_y = screen_y < runtime->clip_y0 ?
@@ -987,7 +1232,14 @@ static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
     }
 }
 
+static void draw_map_tile(p8p_runtime_t *runtime, int sprite,
+                          int screen_x, int screen_y, int sprite_base) {
+    profile_api(P8P_API_SPRITE);
+    blit_tile(runtime, sprite, screen_x, screen_y, sprite_base);
+}
+
 static int api_map(lua_State *lua) {
+    flush_redirected_drawing(active_runtime);
     profile_api(P8P_API_SPRITE);
     p8p_runtime_t *runtime = active_runtime;
     int cell_x = arg_int(lua, 1, 0);
@@ -1073,18 +1325,31 @@ static int api_clip(lua_State *lua) {
     return 4;
 }
 
+static void reset_transparency(p8p_runtime_t *runtime) {
+    if (runtime->transparency_default)
+        return;
+    memset(runtime->transparent, 0, sizeof(runtime->transparent));
+    runtime->transparent[0] = 1;
+    for (int color = 0; color < 16; ++color)
+        runtime->ram[0x5f00 + color] = (uint8_t)(
+            runtime->draw_palette[color] | (color == 0 ? 0x10 : 0));
+    runtime->transparency_default = 1;
+}
+
 static int api_pal(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
-        if (runtime->palettes_default)
-            return 0;
-        for (int i = 0; i < 16; ++i) {
-            runtime->draw_palette[i] = (uint8_t)i;
-            runtime->screen_palette[i] = (uint8_t)i;
-            palette_entry_to_ram(runtime, i);
+        /* Like PICO-8, pal() also resets transparency to palt(). */
+        if (!runtime->palettes_default) {
+            for (int i = 0; i < 16; ++i) {
+                runtime->draw_palette[i] = (uint8_t)i;
+                runtime->screen_palette[i] = (uint8_t)i;
+                palette_entry_to_ram(runtime, i);
+            }
+            runtime->palettes_default = 1;
         }
-        runtime->palettes_default = 1;
+        reset_transparency(runtime);
     } else if (lua_istable(lua, 1)) {
         int screen = arg_int(lua, 2, 0) == 1;
         lua_pushnil(lua);
@@ -1127,14 +1392,17 @@ static int api_palt(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
-        if (runtime->transparency_default)
-            return 0;
-        memset(runtime->transparent, 0, sizeof(runtime->transparent));
-        runtime->transparent[0] = 1;
-        for (int color = 0; color < 16; ++color)
+        reset_transparency(runtime);
+    } else if (lua_gettop(lua) == 1) {
+        /* palt(bitfield): bit 15-i makes colour i transparent. */
+        int bits = arg_int(lua, 1, 0) & 0xffff;
+        for (int color = 0; color < 16; ++color) {
+            runtime->transparent[color] = (uint8_t)((bits >> (15 - color)) & 1);
             runtime->ram[0x5f00 + color] = (uint8_t)(
-                runtime->draw_palette[color] | (color == 0 ? 0x10 : 0));
-        runtime->transparency_default = 1;
+                runtime->draw_palette[color] |
+                (runtime->transparent[color] ? 0x10 : 0));
+        }
+        runtime->transparency_default = bits == 0x8000;
     } else {
         int color = arg_int(lua, 1, 0) & 15;
         uint8_t transparent =
@@ -1163,16 +1431,26 @@ static int api_btn(lua_State *lua) {
     return 1;
 }
 
+/* 0x5f5c/0x5f5d hold the btnp() repeat delay and interval in frames; 0 means
+ * the default (15, 4) and a delay of 255 disables repeating. */
+static int btnp_fires(const p8p_runtime_t *runtime, uint16_t held) {
+    if (held == 1)
+        return 1;
+    int delay = runtime->ram[0x5f5c] ? runtime->ram[0x5f5c] : 15;
+    int interval = runtime->ram[0x5f5d] ? runtime->ram[0x5f5d] : 4;
+    if (delay == 255)
+        return 0;
+    return held > delay && (held - delay) % interval == 0;
+}
+
 static int api_btnp(lua_State *lua) {
     profile_api(P8P_API_INPUT);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
         int mask = 0;
-        for (int button = 0; button < 7; ++button) {
-            uint16_t held = runtime->held_frames[button];
-            if (held == 1 || (held > 15 && ((held - 15) & 3) == 0))
+        for (int button = 0; button < 7; ++button)
+            if (btnp_fires(runtime, runtime->held_frames[button]))
                 mask |= 1 << button;
-        }
         push_int(lua, mask);
         return 1;
     }
@@ -1180,8 +1458,7 @@ static int api_btnp(lua_State *lua) {
     int player = arg_int(lua, 2, 0);
     int pressed = 0;
     if (player == 0 && button >= 0 && button < 7) {
-        uint16_t held = runtime->held_frames[button];
-        pressed = held == 1 || (held > 15 && ((held - 15) & 3) == 0);
+        pressed = btnp_fires(runtime, runtime->held_frames[button]);
     }
     lua_pushboolean(lua, pressed);
     return 1;
@@ -1192,7 +1469,11 @@ static int api_peek(lua_State *lua) {
     int address = arg_int(lua, 1, 0) & 0xffff;
     int count = arg_int(lua, 2, 1);
     if (count < 1) count = 1;
-    if (count > 8192) count = 8192;
+    /* PICO-8 v0.2.5+ raised the multi-value peek limit from 8192. */
+    if (count > 32767) count = 32767;
+    /* C functions are only guaranteed LUA_MINSTACK free slots. */
+    if (!lua_checkstack(lua, count))
+        return luaL_error(lua, "peek: stack overflow");
     if (range_touches_screen(address, count))
         screen_to_ram(active_runtime);
     for (int i = 0; i < count; ++i)
@@ -1206,14 +1487,11 @@ static int api_poke(lua_State *lua) {
     int values = lua_gettop(lua) - 1;
     if (values < 1)
         values = 1;
-    int touches_screen = range_touches_screen(address, values);
-    if (touches_screen)
-        screen_to_ram(active_runtime);
     for (int i = 0; i < values; ++i)
         active_runtime->ram[(address + i) & 0xffff] =
             (uint8_t)arg_int(lua, i + 2, 0);
-    if (touches_screen)
-        ram_to_screen(active_runtime);
+    if (range_touches_screen(address, values))
+        ram_to_screen_range(active_runtime, address, values);
     if (range_touches_draw_state(address, values))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, values))
@@ -1241,11 +1519,10 @@ static int api_poke2(lua_State *lua) {
     int value = arg_int(lua, 2, 0);
     if (address < 0 || address > 0xfffe)
         return 0;
-    int touches_screen = range_touches_screen(address, 2);
-    if (touches_screen) screen_to_ram(active_runtime);
     active_runtime->ram[address] = (uint8_t)value;
     active_runtime->ram[address + 1] = (uint8_t)(value >> 8);
-    if (touches_screen) ram_to_screen(active_runtime);
+    if (range_touches_screen(address, 2))
+        ram_to_screen_range(active_runtime, address, 2);
     if (range_touches_draw_state(address, 2))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, 2)) cartdata_mark_dirty(active_runtime);
@@ -1275,13 +1552,12 @@ static int api_poke4(lua_State *lua) {
     if (address < 0 || address > 0xfffc)
         return 0;
     uint32_t bits = (uint32_t)arg_number(lua, 2, fix32(0)).bits();
-    int touches_screen = range_touches_screen(address, 4);
-    if (touches_screen) screen_to_ram(active_runtime);
     active_runtime->ram[address] = (uint8_t)bits;
     active_runtime->ram[address + 1] = (uint8_t)(bits >> 8);
     active_runtime->ram[address + 2] = (uint8_t)(bits >> 16);
     active_runtime->ram[address + 3] = (uint8_t)(bits >> 24);
-    if (touches_screen) ram_to_screen(active_runtime);
+    if (range_touches_screen(address, 4))
+        ram_to_screen_range(active_runtime, address, 4);
     if (range_touches_draw_state(address, 4))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, 4)) cartdata_mark_dirty(active_runtime);
@@ -1294,12 +1570,9 @@ static int api_memset(lua_State *lua) {
     int value = arg_int(lua, 2, 0);
     int length = arg_int(lua, 3, 0);
     if (destination >= 0 && length >= 0 && destination + length <= 0x10000) {
-        int touches_screen = range_touches_screen(destination, length);
-        if (touches_screen)
-            screen_to_ram(active_runtime);
         memset(active_runtime->ram + destination, value, (size_t)length);
-        if (touches_screen)
-            ram_to_screen(active_runtime);
+        if (range_touches_screen(destination, length))
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
         if (range_touches_cartdata(destination, length))
@@ -1317,12 +1590,12 @@ static int api_memcpy(lua_State *lua) {
         destination + length <= 0x10000 && source + length <= 0x10000) {
         int reads_screen = range_touches_screen(source, length);
         int writes_screen = range_touches_screen(destination, length);
-        if (reads_screen || writes_screen)
+        if (reads_screen)
             screen_to_ram(active_runtime);
         memmove(active_runtime->ram + destination, active_runtime->ram + source,
                 (size_t)length);
         if (writes_screen)
-            ram_to_screen(active_runtime);
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
         if (range_touches_cartdata(destination, length))
@@ -1340,12 +1613,10 @@ static int api_reload(lua_State *lua) {
         destination + length <= 0x10000 &&
         source + length <= (int)P8P_CART_ROM_SIZE) {
         int writes_screen = range_touches_screen(destination, length);
-        if (writes_screen)
-            screen_to_ram(active_runtime);
         memcpy(active_runtime->ram + destination, active_runtime->cart_rom + source,
                (size_t)length);
         if (writes_screen)
-            ram_to_screen(active_runtime);
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
     }
@@ -1460,109 +1731,438 @@ static int api_cursor(lua_State *lua) {
     return 2;
 }
 
-static uint16_t glyph_bits(uint8_t character) {
-#define GLYPH(r0, r1, r2, r3, r4) \
-    ((uint16_t)((r0) << 12) | (uint16_t)((r1) << 9) | \
-     (uint16_t)((r2) << 6) | (uint16_t)((r3) << 3) | (uint16_t)(r4))
-    if (character >= 'a' && character <= 'z')
-        character = (uint8_t)(character - ('a' - 'A'));
-    switch (character) {
-    case '0': return GLYPH(2, 5, 5, 5, 2);
-    case '1': return GLYPH(2, 6, 2, 2, 7);
-    case '2': return GLYPH(6, 1, 2, 4, 7);
-    case '3': return GLYPH(6, 1, 2, 1, 6);
-    case '4': return GLYPH(5, 5, 7, 1, 1);
-    case '5': return GLYPH(7, 4, 6, 1, 6);
-    case '6': return GLYPH(3, 4, 6, 5, 2);
-    case '7': return GLYPH(7, 1, 2, 2, 2);
-    case '8': return GLYPH(2, 5, 2, 5, 2);
-    case '9': return GLYPH(2, 5, 3, 1, 6);
-    case 'A': return GLYPH(2, 5, 7, 5, 5);
-    case 'B': return GLYPH(6, 5, 6, 5, 6);
-    case 'C': return GLYPH(3, 4, 4, 4, 3);
-    case 'D': return GLYPH(6, 5, 5, 5, 6);
-    case 'E': return GLYPH(7, 4, 6, 4, 7);
-    case 'F': return GLYPH(7, 4, 6, 4, 4);
-    case 'G': return GLYPH(3, 4, 5, 5, 3);
-    case 'H': return GLYPH(5, 5, 7, 5, 5);
-    case 'I': return GLYPH(7, 2, 2, 2, 7);
-    case 'J': return GLYPH(1, 1, 1, 5, 2);
-    case 'K': return GLYPH(5, 5, 6, 5, 5);
-    case 'L': return GLYPH(4, 4, 4, 4, 7);
-    case 'M': return GLYPH(5, 7, 7, 5, 5);
-    case 'N': return GLYPH(5, 7, 7, 7, 5);
-    case 'O': return GLYPH(2, 5, 5, 5, 2);
-    case 'P': return GLYPH(6, 5, 6, 4, 4);
-    case 'Q': return GLYPH(2, 5, 5, 3, 1);
-    case 'R': return GLYPH(6, 5, 6, 5, 5);
-    case 'S': return GLYPH(3, 4, 2, 1, 6);
-    case 'T': return GLYPH(7, 2, 2, 2, 2);
-    case 'U': return GLYPH(5, 5, 5, 5, 7);
-    case 'V': return GLYPH(5, 5, 5, 5, 2);
-    case 'W': return GLYPH(5, 5, 7, 7, 5);
-    case 'X': return GLYPH(5, 5, 2, 5, 5);
-    case 'Y': return GLYPH(5, 5, 2, 2, 2);
-    case 'Z': return GLYPH(7, 1, 2, 4, 7);
-    case '!': return GLYPH(2, 2, 2, 0, 2);
-    case '?': return GLYPH(6, 1, 2, 0, 2);
-    case '.': return GLYPH(0, 0, 0, 0, 2);
-    case ',': return GLYPH(0, 0, 0, 2, 4);
-    case ':': return GLYPH(0, 2, 0, 2, 0);
-    case ';': return GLYPH(0, 2, 0, 2, 4);
-    case '-': return GLYPH(0, 0, 7, 0, 0);
-    case '+': return GLYPH(0, 2, 7, 2, 0);
-    case '/': return GLYPH(1, 1, 2, 4, 4);
-    case '\\': return GLYPH(4, 4, 2, 1, 1);
-    case '(': return GLYPH(1, 2, 2, 2, 1);
-    case ')': return GLYPH(4, 2, 2, 2, 4);
-    case '[': return GLYPH(3, 2, 2, 2, 3);
-    case ']': return GLYPH(6, 2, 2, 2, 6);
-    case '<': return GLYPH(1, 2, 4, 2, 1);
-    case '>': return GLYPH(4, 2, 1, 2, 4);
-    case '=': return GLYPH(0, 7, 0, 7, 0);
-    case '_': return GLYPH(0, 0, 0, 0, 7);
-    case '\'': return GLYPH(2, 2, 0, 0, 0);
-    case '"': return GLYPH(5, 5, 0, 0, 0);
-    case '#': return GLYPH(5, 7, 5, 7, 5);
-    case '%': return GLYPH(5, 1, 2, 4, 5);
-    case '*': return GLYPH(0, 5, 2, 5, 0);
-    default: return 0;
+/*
+ * PICO-8 text engine: P8SCII control codes, the full 256-glyph default font
+ * and the custom font at 0x5600.  Ported from Fake-08's printHelper.cpp and
+ * Graphics::drawCharacter (MIT), adapted to this runtime's RAM model.
+ */
+enum {
+    PRINT_ON = 0x01,
+    PRINT_PADDING = 0x02,
+    PRINT_WIDE = 0x04,
+    PRINT_TALL = 0x08,
+    PRINT_SOLID_BG = 0x10,
+    PRINT_INVERTED = 0x20,
+    PRINT_STRIPEY = 0x40,
+    PRINT_CUSTOM_FONT = 0x80
+};
+
+/* P8SCII parameter characters: 0-9 then a-z for 10-35. */
+static int print_param(uint8_t character) {
+    if (character >= '0' && character <= '9')
+        return character - '0';
+    if (character >= 'a')
+        return character - 'a' + 10;
+    return 0;
+}
+
+static int print_hex(const uint8_t *text, size_t length, size_t at, int digits) {
+    int value = 0;
+    for (int i = 0; i < digits; ++i) {
+        uint8_t c = at + (size_t)i < length ? text[at + (size_t)i] : '0';
+        int nibble = c >= '0' && c <= '9' ? c - '0' :
+                     c >= 'a' && c <= 'f' ? c - 'a' + 10 :
+                     c >= 'A' && c <= 'F' ? c - 'A' + 10 : 0;
+        value = value * 16 + nibble;
     }
-#undef GLYPH
+    return value;
+}
+
+/* Same RAM side effects as poke(). */
+static void write_ram_bytes(p8p_runtime_t *runtime, int address,
+                            const uint8_t *bytes, int count) {
+    address &= 0xffff;
+    if (count <= 0)
+        return;
+    for (int i = 0; i < count; ++i)
+        runtime->ram[(address + i) & 0xffff] = bytes[i];
+    if (range_touches_screen(address, count))
+        ram_to_screen_range(runtime, address, count);
+    if (range_touches_draw_state(address, count))
+        draw_state_from_ram(runtime);
+    if (range_touches_cartdata(address, count))
+        cartdata_mark_dirty(runtime);
+}
+
+/* Returns the extra width/height produced by wide/tall modes. */
+static void draw_glyph_rows(p8p_runtime_t *runtime, const uint8_t *rows,
+                            int x, int y, uint8_t fg, uint8_t bg, int mode,
+                            int width, int height, int *extra_width,
+                            int *extra_height) {
+    int w_factor = 1, h_factor = 1;
+    int stripey = 0, inverted = 0, solid_bg = 0;
+    *extra_width = *extra_height = 0;
+    if (mode & PRINT_ON) {
+        if (mode & PRINT_WIDE) { w_factor = 2; *extra_width = width; }
+        if (mode & PRINT_TALL) { h_factor = 2; *extra_height = height; }
+        stripey = (mode & PRINT_STRIPEY) != 0;
+        inverted = (mode & PRINT_INVERTED) != 0;
+        solid_bg = (mode & PRINT_SOLID_BG) != 0;
+    }
+    x -= runtime->camera_x;
+    y -= runtime->camera_y;
+    fg &= 15;
+    bg &= 15;
+    int out_w = width * w_factor;
+    int out_h = height * h_factor;
+    if (w_factor == 1 && h_factor == 1 && !inverted && !solid_bg &&
+        width <= 8 && height <= 8 &&
+        x >= runtime->clip_x0 && x + out_w <= runtime->clip_x1 &&
+        y >= runtime->clip_y0 && y + out_h <= runtime->clip_y1) {
+        /* Common case: plain glyph fully inside the clip rectangle. */
+        uint8_t *row_start = runtime->framebuffer + y * 128 + x;
+        for (int row = 0; row < height; ++row, row_start += 128) {
+            unsigned bits = rows[row];
+            for (int column = 0; bits && column < width; ++column, bits >>= 1)
+                if (bits & 1u)
+                    row_start[column] = fg;
+        }
+        runtime->screen_ram_dirty = 1;
+        return;
+    }
+    for (int dy = 0; dy < out_h; ++dy) {
+        int font_row = dy / h_factor;
+        if (font_row >= 8)
+            continue;
+        for (int dx = 0; dx < out_w; ++dx) {
+            int font_column = dx / w_factor;
+            if (font_column >= 8)
+                continue;
+            int on = (rows[font_row] >> font_column) & 1;
+            if (stripey && h_factor > 1 && (dy & 1)) on = 0;
+            if (stripey && w_factor > 1 && (dx & 1)) on = 0;
+            int px = x + dx, py = y + dy;
+            if (!in_clip(runtime, px, py) || (unsigned)px >= 128u ||
+                (unsigned)py >= 128u)
+                continue;
+            if (inverted)
+                on = !on;
+            if (on)
+                runtime->framebuffer[py * 128 + px] = fg;
+            else if (solid_bg)
+                runtime->framebuffer[py * 128 + px] = bg;
+            else
+                continue;
+            runtime->screen_ram_dirty = 1;
+        }
+    }
+}
+
+static int draw_glyph(p8p_runtime_t *runtime, uint8_t character, int x, int y,
+                      uint8_t fg, uint8_t bg, int mode, int force_width,
+                      int force_height) {
+    int extra = 0;
+    int custom = (mode & PRINT_CUSTOM_FONT) != 0;
+    const uint8_t *font = custom ? runtime->ram + 0x5600 : p8p_pico8_font;
+    int char_width = font[0];
+    int wide_width = font[1];
+    int char_height = font[2];
+    if (character > 0x0f) {
+        int width_forced = force_width > -1 && force_width < 4;
+        int render_width = width_forced ?
+            (character < 0x80 ? force_width : force_width + 4) :
+            custom ? 8 : (character < 0x80 ? char_width : wide_width);
+        if (character >= 0x80)
+            extra = wide_width - char_width;
+        int render_height = force_height > -1 && force_height < 5 ?
+            force_height : char_height;
+        int sx = x - runtime->camera_x, sy = y - runtime->camera_y;
+        if (!(mode & PRINT_ON) && render_width <= 8 && render_height <= 8 &&
+            sx >= runtime->clip_x0 && sx + render_width <= runtime->clip_x1 &&
+            sy >= runtime->clip_y0 && sy + render_height <= runtime->clip_y1) {
+            /* Plain glyph fully inside the clip rectangle. */
+            const uint8_t *rows = font + character * 8;
+            unsigned mask = (1u << render_width) - 1u;
+            uint8_t color = fg & 15;
+            uint8_t *row_start = runtime->framebuffer + sy * 128 + sx;
+            for (int row = 0; row < render_height; ++row, row_start += 128) {
+                unsigned bits = rows[row] & mask;
+                for (uint8_t *pixel = row_start; bits; bits >>= 1, ++pixel)
+                    if (bits & 1u)
+                        *pixel = color;
+            }
+            runtime->screen_ram_dirty = 1;
+            return extra;
+        }
+        int extra_width, extra_height;
+        draw_glyph_rows(runtime, font + character * 8, x, y, fg, bg, mode,
+                        render_width, render_height, &extra_width,
+                        &extra_height);
+        extra += extra_width;
+    }
+    if (mode & PRINT_ON)
+        return 0;
+    return extra;
 }
 
 static int api_print(lua_State *lua) {
     profile_api(P8P_API_TEXT);
-    size_t text_length = 0;
-    const char *text = luaL_tolstring(lua, 1, &text_length);
-    int x = arg_int(lua, 2, active_runtime->cursor_x);
-    int y = arg_int(lua, 3, active_runtime->cursor_y);
-    int origin_x = x;
-    int max_width = 0;
-    int color = arg_int(lua, 4, active_runtime->draw_color);
-
-    for (size_t i = 0; text && i < text_length; ++i) {
-        uint8_t character = (uint8_t)text[i];
-        if (character == '\n') {
-            int width = x - origin_x;
-            if (width > max_width) max_width = width;
-            x = origin_x;
-            y += 6;
-            continue;
+    p8p_runtime_t *runtime = active_runtime;
+    size_t length = 0;
+    /* Strings need no conversion; luaL_tolstring would still probe for a
+     * __tostring metamethod and push a copy. */
+    int converted = lua_type(lua, 1) != LUA_TSTRING;
+    const uint8_t *text = (const uint8_t *)(converted ?
+        luaL_tolstring(lua, 1, &length) : lua_tolstring(lua, 1, &length));
+    int arguments = lua_gettop(lua) - converted;
+    int x = runtime->cursor_x, y = runtime->cursor_y;
+    if (arguments == 2) {
+        /* print(str, col) */
+        runtime->draw_color = arg_int(lua, 2, runtime->draw_color) & 255;
+        runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
+    } else if (arguments >= 3) {
+        x = arg_int(lua, 2, x);
+        y = arg_int(lua, 3, y);
+        if (arguments >= 4) {
+            runtime->draw_color = arg_int(lua, 4, runtime->draw_color) & 255;
+            runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
         }
-        uint16_t bits = glyph_bits(character);
-        for (int row = 0; row < 5; ++row)
-            for (int column = 0; column < 3; ++column)
-                if (bits & (1u << (14 - row * 3 - column)))
-                    screen_set(active_runtime, x + column, y + row, color);
-        x += 4;
     }
-    if (x - origin_x > max_width) max_width = x - origin_x;
-    active_runtime->cursor_x = origin_x;
-    active_runtime->cursor_y = y + 6;
-    cursor_to_ram(active_runtime);
-    lua_pop(lua, 1);
-    push_int(lua, max_width);
+
+    int home_x = x, home_y = y;
+    int prev_x = x, prev_y = y;
+    int right_x = x;
+    int tab_width = 4;
+    int char_width = 4, char_height = 6;
+    int line_height = 0;
+    int force_width = -1, force_height = -1;
+    int bg_color = -1;
+    int fg_color = runtime->draw_color & 15;
+    int cancel_wrap = 0;
+    int outline_color = 0, outline_neighbours = 0;
+    int underline = 0;
+    int wrap_x = -1;
+    int mode = runtime->ram[0x5f58];
+    if (!(mode & PRINT_ON))
+        mode = 0;
+    if (mode & PRINT_CUSTOM_FONT) {
+        char_width = runtime->ram[0x5600];
+        char_height = runtime->ram[0x5602];
+    }
+    const uint8_t *pal = runtime->draw_palette;
+#define PRINT_NEXT() (n + 1 < length ? text[++n] : (++n, (uint8_t)0))
+#define PRINT_BG() ((uint8_t)(bg_color < 0 ? 0 : pal[bg_color & 15]))
+
+    for (size_t n = 0; n < length; ++n) {
+        uint8_t ch = text[n];
+        if (ch == 0) {
+            break;
+        } else if (ch == 1) {                 /* \* repeat */
+            int times = print_param(PRINT_NEXT());
+            uint8_t repeated = PRINT_NEXT();
+            for (int i = 0; i < times; ++i)
+                x += char_width + draw_glyph(runtime, repeated, x, y,
+                    pal[fg_color], PRINT_BG(), mode, force_width, force_height);
+        } else if (ch == 2) {                 /* \# background */
+            bg_color = print_param(PRINT_NEXT());
+            mode |= PRINT_ON | PRINT_SOLID_BG;
+        } else if (ch == 3) {                 /* \- */
+            x += print_param(PRINT_NEXT()) - 16;
+        } else if (ch == 4) {                 /* \| */
+            y += print_param(PRINT_NEXT()) - 16;
+        } else if (ch == 5) {                 /* \+ */
+            x += print_param(PRINT_NEXT()) - 16;
+            y += print_param(PRINT_NEXT()) - 16;
+        } else if (ch == 6) {                 /* \^ commands */
+            uint8_t command = PRINT_NEXT();
+            if (command >= '1' && command <= '9') {
+                /* Frame delays are not emulated. */
+            } else if (command == 'd' || command == 's' || command == 'r' ||
+                       command == 'c' || command == 'x' || command == 'y') {
+                int value = print_param(PRINT_NEXT());
+                if (command == 's') {
+                    tab_width = value;
+                } else if (command == 'r') {
+                    wrap_x = value * 4;
+                } else if (command == 'c') {
+                    uint8_t color = pal[value & 15] & 15;
+                    memset(runtime->framebuffer, color,
+                           sizeof(runtime->framebuffer));
+                    runtime->screen_ram_dirty = 1;
+                } else if (command == 'x') {
+                    force_width = char_width = value;
+                } else if (command == 'y') {
+                    force_height = char_height = value;
+                }
+            } else if (command == 'g') {
+                x = home_x;
+                y = home_y;
+            } else if (command == 'h') {
+                home_x = x;
+                home_y = y;
+            } else if (command == 'j') {
+                x = print_param(PRINT_NEXT()) * 4;
+                y = print_param(PRINT_NEXT()) * 4;
+            } else if (command == 'w') {
+                mode |= PRINT_ON | PRINT_WIDE;
+                char_width = 8;
+            } else if (command == 't') {
+                mode |= PRINT_ON | PRINT_TALL;
+                char_height = 12;
+            } else if (command == '=') {
+                mode |= PRINT_ON | PRINT_STRIPEY;
+            } else if (command == 'p') {
+                mode |= PRINT_ON | PRINT_WIDE | PRINT_TALL | PRINT_STRIPEY;
+                char_width = 8;
+                char_height = 12;
+            } else if (command == 'i') {
+                mode |= PRINT_ON | PRINT_INVERTED;
+            } else if (command == 'b') {
+                mode |= PRINT_ON | PRINT_PADDING;
+            } else if (command == '#') {
+                mode |= PRINT_ON | PRINT_SOLID_BG;
+            } else if (command == ':' || command == ';' ||
+                       command == '.' || command == ',') {
+                /* One-off 8x8 glyph from hex (: ;) or raw bytes (. ,). */
+                uint8_t rows[8] = {0};
+                int glyph_height = force_height > 0 ? force_height : 8;
+                for (int i = 0; i < 8; ++i) {
+                    if (command == ':' || command == ';') {
+                        rows[i] = (uint8_t)print_hex(text, length, n + 1 + i * 2, 2);
+                    } else {
+                        rows[i] = n + 1 + i < length ? text[n + 1 + i] : 0;
+                    }
+                }
+                n += (command == ':' || command == ';') ? 16 : 8;
+                int extra_width, extra_height;
+                draw_glyph_rows(runtime, rows, x, y, pal[fg_color], PRINT_BG(),
+                                mode, 8, glyph_height, &extra_width,
+                                &extra_height);
+                x += 8 + extra_width;
+                glyph_height += extra_height;
+                if (glyph_height > line_height)
+                    line_height = glyph_height;
+            } else if (command == '-') {
+                uint8_t off = PRINT_NEXT();
+                if (mode) {
+                    if (off == 'w') { mode &= ~PRINT_WIDE; char_width = 4; }
+                    else if (off == 't') { mode &= ~PRINT_TALL; char_height = 6; }
+                    else if (off == '=') mode &= ~PRINT_STRIPEY;
+                    else if (off == 'p') {
+                        mode &= ~(PRINT_WIDE | PRINT_TALL | PRINT_STRIPEY);
+                        char_width = 4;
+                        char_height = 6;
+                    }
+                    else if (off == 'i') mode &= ~PRINT_INVERTED;
+                    else if (off == 'b') mode &= ~PRINT_PADDING;
+                    else if (off == '#') mode &= ~PRINT_SOLID_BG;
+                }
+            } else if (command == '!') {
+                /* Poke the rest of the string at a hex address. */
+                int address = print_hex(text, length, n + 1, 4);
+                size_t data = n + 5;
+                if (data < length)
+                    write_ram_bytes(runtime, address, text + data,
+                                    (int)(length - data));
+                n = length;
+                cancel_wrap = 1;
+            } else if (command == '@') {
+                int address = print_hex(text, length, n + 1, 4);
+                int count = print_hex(text, length, n + 5, 4);
+                size_t data = n + 9;
+                if (data > length) data = length;
+                if ((size_t)count > length - data)
+                    count = (int)(length - data);
+                write_ram_bytes(runtime, address, text + data, count);
+                n = data + (size_t)count - 1;
+            } else if (command == 'o') {
+                outline_color = print_param(PRINT_NEXT());
+                outline_neighbours = print_hex(text, length, n + 1, 2);
+                n += 2;
+            } else if (command == 'u') {
+                underline = 1;
+            }
+        } else if (ch == 7) {                 /* \a audio: skipped */
+            while (n + 1 < length && text[n + 1] != ' ')
+                ++n;
+            if (n + 1 < length)
+                ++n;
+        } else if (ch == 11) {                /* \v decorate */
+            int offset = print_param(PRINT_NEXT());
+            uint8_t decoration = PRINT_NEXT();
+            draw_glyph(runtime, decoration, prev_x + offset % 4 - 2,
+                       prev_y + offset / 4 - 8, pal[fg_color], PRINT_BG(),
+                       mode, force_width, force_height);
+        } else if (ch == 12) {                /* \f foreground */
+            fg_color = print_param(PRINT_NEXT()) & 15;
+        } else if (ch == 14) {                /* custom font on */
+            mode |= PRINT_CUSTOM_FONT;
+            char_width = runtime->ram[0x5600];
+            char_height = runtime->ram[0x5602];
+        } else if (ch == 15) {                /* custom font off */
+            mode &= ~PRINT_CUSTOM_FONT;
+            char_width = 4;
+            char_height = 6;
+        } else if (ch == '\n') {
+            x = home_x;
+            y += line_height > 0 ? line_height : 6;
+            line_height = 0;
+        } else if (ch == '\t') {
+            int stop = tab_width * 4;
+            if (stop > 0)
+                while (x % stop)
+                    ++x;
+        } else if (ch == '\b') {
+            x -= char_width;
+        } else if (ch == '\r') {
+            x = home_x;
+        } else if (ch >= 0x10) {
+            if (char_height > line_height)
+                line_height = char_height;
+            if ((mode & PRINT_SOLID_BG) && bg_color >= 0) {
+                int saved_color = runtime->draw_color;
+                for (int row = y - 1; row < y + line_height - 1; ++row)
+                    draw_hspan(runtime, x - 1, x + char_width - 1, row,
+                               bg_color);
+                runtime->draw_color = saved_color;
+            }
+            prev_x = x;
+            prev_y = y;
+            if (outline_color && outline_neighbours) {
+                static const int8_t ox[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
+                static const int8_t oy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
+                for (int i = 0; i < 8; ++i)
+                    if (outline_neighbours & (1 << i))
+                        draw_glyph(runtime, ch, x + ox[i], y + oy[i],
+                                   pal[outline_color & 15], PRINT_BG(), mode,
+                                   force_width, force_height);
+            }
+            if (underline)
+                draw_hspan(runtime, x - 1, x + char_width - 1,
+                           y + line_height, fg_color);
+            int extra = draw_glyph(runtime, ch, x, y, pal[fg_color],
+                                   PRINT_BG(), mode, force_width, force_height);
+            int adjust = 0;
+            if ((mode & PRINT_CUSTOM_FONT) && (runtime->ram[0x5605] & 1)) {
+                int nibble_index = ch - 16;
+                if (nibble_index >= 0 && nibble_index < 240) {
+                    uint8_t packed = runtime->ram[0x5608 + nibble_index / 2];
+                    int nibble = (nibble_index & 1) ? packed >> 4 : packed & 15;
+                    adjust = nibble & 7;
+                    if (adjust >= 4)
+                        adjust -= 8;
+                }
+            }
+            x += char_width + extra + adjust;
+        }
+        if (x > right_x)
+            right_x = x;
+        if (wrap_x > 0 && x >= wrap_x) {
+            x = home_x;
+            y += line_height > 0 ? line_height : 6;
+            line_height = 0;
+        }
+    }
+#undef PRINT_NEXT
+#undef PRINT_BG
+    if (line_height <= 0)
+        line_height = cancel_wrap ? 0 : 6;
+    runtime->cursor_x = home_x;
+    runtime->cursor_y = y + line_height;
+    cursor_to_ram(runtime);
+    if (converted)
+        lua_pop(lua, 1);
+    push_int(lua, right_x);
     return 1;
 }
 
@@ -1643,6 +2243,10 @@ static int api_stat(lua_State *lua) {
     case 55:
         push_int(lua, p8p_audio_music_count(runtime->audio));
         break;
+    case 26:
+    case 56:
+        push_int(lua, p8p_audio_music_ticks(runtime->audio));
+        break;
     case 28:
     case 30:
     case 120:
@@ -1675,7 +2279,8 @@ static int api_stat(lua_State *lua) {
         lua_pushnil(lua);
         break;
     case 108:
-        push_int(lua, 32);
+        /* PCM samples still queued from serial(0x808). */
+        push_int(lua, p8p_audio_pcm_queued(runtime->audio));
         break;
     case 46: case 47: case 48: case 49:
         push_int(lua, p8p_audio_channel_sfx(runtime->audio, item - 46));
@@ -1701,9 +2306,33 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
+/* trace([message]) returns a stack trace in PICO-8; the Lua debug library
+ * is hidden here, so only the message comes back. */
+static int api_trace(lua_State *lua) {
+    int index = lua_type(lua, 1) == LUA_TTHREAD ? 2 : 1;
+    if (lua_type(lua, index) == LUA_TSTRING)
+        lua_pushvalue(lua, index);
+    else
+        lua_pushliteral(lua, "");
+    return 1;
+}
+
+/* serial(channel, address, length).  Only 0x808, PICO-8's 8-bit 5512.5 Hz
+ * PCM output, is implemented; other channels consume nothing. */
 static int api_serial(lua_State *lua) {
-    (void)lua;
-    push_int(lua, 0);
+    p8p_runtime_t *runtime = active_runtime;
+    int channel = arg_int(lua, 1, 0);
+    int address = arg_int(lua, 2, 0);
+    int length = arg_int(lua, 3, 0);
+    int processed = 0;
+    if (channel == 0x808 && address >= 0 && length > 0 &&
+        address + length <= 0x10000) {
+        if (range_touches_screen(address, length))
+            screen_to_ram(runtime);
+        processed = p8p_audio_pcm_push(runtime->audio, runtime->ram + address,
+                                       length);
+    }
+    push_int(lua, processed);
     return 1;
 }
 
@@ -1817,6 +2446,13 @@ static const luaL_Reg runtime_api[] = {
     {"foreach", api_foreach}, {NULL, NULL}
 };
 
+/* Added after 0.0.33's first save-state format: numbered last by
+ * eris.__p8p_init so existing permanent-object IDs do not move. Keep in
+ * sync with the list in that function. */
+static const luaL_Reg late_runtime_api[] = {
+    {"cstore", api_stub}, {"trace", api_trace}, {NULL, NULL}
+};
+
 static void register_pico8_button_constants(lua_State *lua) {
     static const uint8_t pico8_names[6] = {
         0x8b, /* left */
@@ -1837,6 +2473,23 @@ static void register_pico8_button_constants(lua_State *lua) {
         push_int(lua, button);
         lua_setglobal(lua, utf8_names[button]);
     }
+    /* Glyphs 128-153 double as fill patterns, e.g. fillp(\x81) is a
+     * checkerboard with transparency.  Values as in PICO-8 (via Fake-08);
+     * the button glyphs above keep their button numbers. */
+    static const struct { uint8_t glyph; uint32_t bits; } fill_patterns[] = {
+        {0x80, 0x00000000u}, {0x81, 0x5a5a8000u}, {0x82, 0x511f8000u},
+        {0x84, 0x7d7d8000u}, {0x85, 0xb81d8000u}, {0x86, 0xf99f8000u},
+        {0x87, 0x51bf8000u}, {0x88, 0xb5bf8000u}, {0x89, 0x999f8000u},
+        {0x8a, 0xb11f8000u}, {0x8c, 0xa0e08000u}, {0x8d, 0x9b3f8000u},
+        {0x8f, 0xb1bf8000u}, {0x90, 0xf5ff8000u}, {0x92, 0xb15f8000u},
+        {0x93, 0x1b1f8000u}, {0x95, 0xf5bf8000u}, {0x96, 0x7adf8000u},
+        {0x98, 0x0f0f8000u}, {0x99, 0x55558000u},
+    };
+    for (size_t i = 0; i < sizeof(fill_patterns) / sizeof(fill_patterns[0]); ++i) {
+        pico8_name[0] = (char)fill_patterns[i].glyph;
+        lua_pushnumber(lua, fix32::frombits((int32_t)fill_patterns[i].bits));
+        lua_setglobal(lua, pico8_name);
+    }
 }
 
 static const char bootstrap_lua[] =
@@ -1850,13 +2503,15 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local keys={} for k in pairs(_G) do keys[#keys+1]=k end table.sort(keys)\n"
+    " local late={'cstore','trace'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"
     "  if seen[v] then return end seen[v]=true n+=1 eris.__p8p_perm[v]=n eris.__p8p_unperm[n]=v\n"
     "  if t=='table' and v~=_G and v~=eris then for k,x in pairs(v) do permanent(k) permanent(x) end permanent(getmetatable(v)) end\n"
     " end\n"
     " for i,k in ipairs(keys) do local v=_G[k] permanent(v) eris.__p8p_original[k]=v end\n"
+    " for i,k in ipairs(late) do local v=_G[k] permanent(v) eris.__p8p_original[k]=v end\n"
     "end\n"
     "function eris.__p8p_save()\n"
     " local changed={} for k,v in pairs(_G) do if eris.__p8p_original[k]~=v then changed[k]=v end end\n"
@@ -1878,6 +2533,8 @@ static void set_error(p8p_runtime_t *runtime, const char *prefix) {
 
 static void register_api(lua_State *lua) {
     for (const luaL_Reg *entry = runtime_api; entry->name; ++entry)
+        lua_register(lua, entry->name, entry->func);
+    for (const luaL_Reg *entry = late_runtime_api; entry->name; ++entry)
         lua_register(lua, entry->name, entry->func);
 }
 
@@ -1930,37 +2587,54 @@ static int finish_cart_load(p8p_runtime_t *runtime) {
     return start_init_thread(runtime);
 }
 
-static int dispatch_frame(lua_State *lua) {
+/* Profile events raised by the Lua frame dispatcher (0-3, see below). */
+static int frame_profile_event(lua_State *lua) {
+    static const p8p_runtime_profile_event_t events[4] = {
+        P8P_PROFILE_UPDATE_BEGIN, P8P_PROFILE_UPDATE_END,
+        P8P_PROFILE_DRAW_BEGIN, P8P_PROFILE_DRAW_END,
+    };
     p8p_runtime_t *runtime = active_runtime;
-    const char *update = runtime->target_fps == 60 ? "_update60" : "_update";
+    int event = (int)lua_tointeger(lua, 1);
+    if (runtime && runtime->profile_hook && event >= 0 && event < 4)
+        runtime->profile_hook(runtime->profile_userdata, events[event]);
+    return 0;
+}
 
-    lua_getglobal(lua, update);
-    if (lua_isfunction(lua, -1)) {
-        if (runtime->profile_hook)
-            runtime->profile_hook(runtime->profile_userdata,
-                                  P8P_PROFILE_UPDATE_BEGIN);
-        lua_call(lua, 0, 0);
-        if (runtime->profile_hook)
-            runtime->profile_hook(runtime->profile_userdata,
-                                  P8P_PROFILE_UPDATE_END);
-    } else {
-        lua_pop(lua, 1);
-    }
+/*
+ * _update/_draw run in a coroutine so flip() inside them ends the frame as on
+ * PICO-8: the next step resumes after flip() with fresh input.  Carts use this
+ * for in-frame loops such as "while btn(5) do ... flip() end".  The
+ * dispatcher lives in the registry, not in _G, so the Eris permanent-object
+ * numbering (and existing save states) is unchanged.
+ */
+static const char frame_dispatcher_lua[] =
+    "local prof=...\n"
+    "return function(update, draw)\n"
+    " local u=_ENV[update]\n"
+    " if u then prof(0) u() prof(1) end\n"
+    " if draw then local d=_draw if d then prof(2) d() prof(3) end end\n"
+    "end\n";
 
-    if (runtime->draw_frame) {
-        lua_getglobal(lua, "_draw");
-        if (lua_isfunction(lua, -1)) {
-            if (runtime->profile_hook)
-                runtime->profile_hook(runtime->profile_userdata,
-                                      P8P_PROFILE_DRAW_BEGIN);
-            lua_call(lua, 0, 0);
-            if (runtime->profile_hook)
-                runtime->profile_hook(runtime->profile_userdata,
-                                      P8P_PROFILE_DRAW_END);
-        } else {
-            lua_pop(lua, 1);
-        }
+static int start_frame_thread(p8p_runtime_t *runtime) {
+    runtime->cart_thread = lua_newthread(runtime->lua);
+    runtime->cart_thread_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
+    runtime->cart_thread_kind = 2;
+    lua_rawgeti(runtime->cart_thread, LUA_REGISTRYINDEX, runtime->frame_ref);
+    lua_pushstring(runtime->cart_thread,
+                   runtime->target_fps == 60 ? "_update60" : "_update");
+    lua_pushboolean(runtime->cart_thread, runtime->draw_frame);
+    install_service_hook(runtime);
+    int status = lua_resume(runtime->cart_thread, runtime->lua, 2);
+    if (status == LUA_YIELD) {
+        runtime->cart_thread_active = 1;
+        return 0;
     }
+    if (status != LUA_OK) {
+        set_thread_error(runtime, "frame", runtime->cart_thread);
+        release_cart_thread(runtime);
+        return -2;
+    }
+    release_cart_thread(runtime);
     return 0;
 }
 
@@ -1971,6 +2645,7 @@ extern "C" p8p_runtime_t *p8p_runtime_create(void) {
     runtime->target_fps = 30;
     runtime->draw_frame = 1;
     runtime->draw_color = 6;
+    runtime->draw_target = 0x6000;
     runtime->clip_x1 = runtime->clip_y1 = 128;
     for (int i = 0; i < 16; ++i) {
         runtime->draw_palette[i] = (uint8_t)i;
@@ -2025,6 +2700,7 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     memcpy(runtime->ram, cart->rom, sizeof(runtime->cart_rom));
     runtime->ram[0x5f54] = 0x00;
     runtime->ram[0x5f55] = 0x60;
+    runtime->draw_target = 0x6000;
     runtime->ram[0x5f56] = 0x20;
     runtime->ram[0x5f57] = 128;
     runtime->ram[0x5f5c] = 15;
@@ -2050,9 +2726,13 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     p8p_audio_reset(runtime->audio, runtime->ram);
     runtime->error[0] = '\0';
     runtime->frame_count = 0;
-    runtime->buttons = runtime->previous_buttons = 0;
+    runtime->buttons = runtime->previous_buttons = runtime->frame_buttons = 0;
     memset(runtime->held_frames, 0, sizeof(runtime->held_frames));
-    runtime->lua = luaL_newstate();
+    runtime->lua = lua_newstate(lua_pool_alloc, NULL);
+    if (runtime->lua) {
+        lua_atpanic(runtime->lua, lua_pool_panic);
+        lua_gc(runtime->lua, LUA_GCSETPAUSE, P8P_LUA_GC_PAUSE);
+    }
     if (!runtime->lua) {
         snprintf(runtime->error, sizeof(runtime->error), "cannot create z8lua state");
         return -2;
@@ -2080,6 +2760,21 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     lua_getfield(runtime->lua, -1, "__p8p_load");
     runtime->restore_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     lua_pop(runtime->lua, 1);
+    /* PICO-8 has no debug library, and carts such as Tetyis use a global
+     * named debug as their own flag.  Hide it only after Eris has numbered
+     * the built-ins so state files keep the same permanent-object IDs. */
+    lua_pushnil(runtime->lua);
+    lua_setglobal(runtime->lua, "debug");
+    if (luaL_loadstring(runtime->lua, frame_dispatcher_lua) != LUA_OK) {
+        set_error(runtime, "frame dispatcher");
+        return -3;
+    }
+    lua_pushcfunction(runtime->lua, frame_profile_event);
+    if (lua_pcall(runtime->lua, 1, 1, 0) != LUA_OK) {
+        set_error(runtime, "frame dispatcher");
+        return -3;
+    }
+    runtime->frame_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     runtime->cart_thread = lua_newthread(runtime->lua);
     runtime->cart_thread_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     runtime->cart_thread_kind = 0;
@@ -2173,15 +2868,12 @@ extern "C" void p8p_runtime_set_live_buttons(p8p_runtime_t *runtime,
                                                uint8_t buttons) {
     if (!runtime)
         return;
-    uint8_t next = buttons & 0x7f;
-    for (int button = 0; button < 7; ++button) {
-        uint8_t mask = (uint8_t)(1u << button);
-        if (!(next & mask))
-            runtime->held_frames[button] = 0;
-        else if (!(runtime->buttons & mask))
-            runtime->held_frames[button] = 1;
-    }
-    runtime->buttons = next;
+    /* PICO-8 samples input once per frame.  Mid-frame updates exist so
+     * busy-wait loops see new presses through btn(); they never drop a button
+     * the frame started with (a short tap would vanish before the cart read
+     * it) and leave btnp() timing to the next frame boundary (a press seen
+     * here after the cart's btnp() check would otherwise never register). */
+    runtime->buttons = (uint8_t)(runtime->frame_buttons | (buttons & 0x7f));
 }
 
 extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
@@ -2196,8 +2888,9 @@ extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
         memset(runtime->api_profile_calls, 0,
                sizeof(runtime->api_profile_calls));
     runtime->draw_frame = draw_frame != 0;
-    runtime->previous_buttons = runtime->buttons;
+    runtime->previous_buttons = runtime->frame_buttons;
     runtime->buttons = buttons & 0x7f;
+    runtime->frame_buttons = runtime->buttons;
     for (int i = 0; i < 7; ++i) {
         if (runtime->buttons & (1u << i)) {
             if (runtime->held_frames[i] != 0xffff)
@@ -2226,11 +2919,8 @@ extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
         install_service_hook(runtime);
         return 0;
     }
-    lua_pushcfunction(runtime->lua, dispatch_frame);
-    if (lua_pcall(runtime->lua, 0, 0, 0) != LUA_OK) {
-        set_error(runtime, "frame");
+    if (start_frame_thread(runtime) != 0)
         return -2;
-    }
 
     if (runtime->restart_requested)
         return restart_current_cart(runtime);
@@ -2268,12 +2958,15 @@ static void restore_fixed_state(p8p_runtime_t *runtime,
     memcpy(runtime->ram, state->ram, sizeof(runtime->ram));
     memcpy(runtime->framebuffer, state->framebuffer, sizeof(runtime->framebuffer));
     runtime->screen_ram_dirty = state->screen_ram_dirty;
+    /* The saved framebuffer mirrors whatever 0x5f55 selected at save time. */
+    runtime->draw_target = draw_target_from_ram(runtime);
     memcpy(runtime->draw_palette, state->draw_palette, sizeof(runtime->draw_palette));
     memcpy(runtime->screen_palette, state->screen_palette, sizeof(runtime->screen_palette));
     memcpy(runtime->transparent, state->transparent, sizeof(runtime->transparent));
     update_palette_default_flags(runtime);
     runtime->buttons = state->buttons;
     runtime->previous_buttons = state->previous_buttons;
+    runtime->frame_buttons = runtime->buttons;
     memcpy(runtime->held_frames, state->held_frames, sizeof(runtime->held_frames));
     runtime->held_frames[6] = 0;
     memcpy(runtime->rng, state->rng, sizeof(runtime->rng));
@@ -2398,11 +3091,25 @@ extern "C" int p8p_runtime_load_state(p8p_runtime_t *runtime,
     if (p8p_audio_load_state(runtime->audio, runtime->ram, audio,
                              header.audio_size) != 0)
         return -5;
+    /* A frame suspended in flip() belongs to the pre-load state; start the
+     * next frame afresh instead of resuming it. */
+    if (runtime->cart_thread_active && runtime->cart_thread_kind == 2)
+        release_cart_thread(runtime);
     return 0;
 }
 
 extern "C" const uint8_t *p8p_runtime_framebuffer(p8p_runtime_t *runtime) {
-    return runtime ? runtime->framebuffer : NULL;
+    if (!runtime)
+        return NULL;
+    if (runtime->draw_target == 0x6000)
+        return runtime->framebuffer;
+    /* Drawing is redirected; present the real screen memory. */
+    for (int i = 0; i < 128 * 64; ++i) {
+        uint8_t packed = runtime->ram[0x6000 + i];
+        runtime->display[i * 2] = packed & 15;
+        runtime->display[i * 2 + 1] = packed >> 4;
+    }
+    return runtime->display;
 }
 
 extern "C" const uint8_t *p8p_runtime_screen_palette(p8p_runtime_t *runtime) {

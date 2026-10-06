@@ -13,8 +13,15 @@ typedef struct p8p_settings_file {
     p8p_settings_t settings;
 } p8p_settings_file_t;
 
+/* The host runtime tests compile this file as C++, where GCC rejects C11's
+ * _Static_assert spelling. */
+#ifdef __cplusplus
+static_assert(sizeof(p8p_settings_file_t) <= P8P_STORE_CONFIG_SIZE,
+              "settings must fit the reserved store header");
+#else
 _Static_assert(sizeof(p8p_settings_file_t) <= P8P_STORE_CONFIG_SIZE,
                "settings must fit the reserved store header");
+#endif
 
 static const uint8_t settings_magic[8] = {
     'P', '8', 'P', 'C', 'O', 'N', 'F', 'G'

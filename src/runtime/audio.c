@@ -1,8 +1,15 @@
 #include "p8p/audio.h"
 
+#include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __cplusplus
+#define P8P_STATIC_ASSERT static_assert
+#else
+#define P8P_STATIC_ASSERT _Static_assert
+#endif
 
 #define P8P_AUDIO_CHANNELS 4
 #define P8P_AUDIO_RATE 48000u
@@ -33,6 +40,44 @@ typedef struct p8p_audio_channel {
     uint32_t vibrato_phase;
 } p8p_audio_channel_t;
 
+/* PCM samples buffered from serial(0x808), about 0.74 s at 5512.5 Hz. */
+#define P8P_PCM_CAPACITY 4096u
+/* 5512.5 / 48000 as a 32-bit phase step. */
+#define P8P_PCM_STEP 493250560u
+
+/* PICO-8 reverb delays are 366 and 732 samples at 22050 Hz. */
+#define P8P_REVERB_SHORT 797
+#define P8P_REVERB_LONG 1594
+
+typedef struct p8p_biquad {
+    float x1, x2, y1, y2;
+} p8p_biquad_t;
+
+/*
+ * Per-channel state added for custom instruments and SFX filters.  It is
+ * deliberately kept out of saved states (p8p_audio_state_size() stops before
+ * it) so existing state files keep loading; after a load an instrument simply
+ * restarts on its parent's next note and filter memory starts silent.
+ */
+typedef struct p8p_audio_extra {
+    p8p_audio_channel_t instrument;  /* SFX 0-7 played as an instrument */
+    int seen_sfx;
+    int seen_note;
+    uint8_t parent_custom;
+    uint8_t last_instrument;
+    uint8_t last_key;
+    uint8_t odd_period;              /* saw buzz alternates whole periods */
+    int32_t factor_increment;        /* parent pitch the cached factor is for */
+    uint32_t factor_q16;
+    uint32_t detune_phase;
+    int32_t noise_sample;
+    uint32_t reverb_index;
+    int16_t reverb_short[P8P_REVERB_SHORT];
+    int16_t reverb_long[P8P_REVERB_LONG];
+    p8p_biquad_t damp1;
+    p8p_biquad_t damp2;
+} p8p_audio_extra_t;
+
 struct p8p_audio {
     uint8_t *ram;
     p8p_audio_channel_t channels[P8P_AUDIO_CHANNELS];
@@ -42,6 +87,13 @@ struct p8p_audio {
     uint32_t music_samples_remaining;
     int32_t music_volume_q24;
     int32_t music_fade_step;
+    /* Not serialized; see p8p_audio_extra_t. */
+    p8p_audio_extra_t extra[P8P_AUDIO_CHANNELS];
+    /* PCM stream from serial(0x808); also not serialized. */
+    uint8_t pcm[P8P_PCM_CAPACITY];
+    uint32_t pcm_read;
+    uint32_t pcm_count;
+    uint32_t pcm_phase;
 };
 
 /* 440 * 2^((key - 33) / 12), converted to a 32-bit phase step at 48 kHz. */
@@ -262,12 +314,10 @@ static int32_t triangle(uint32_t phase) {
     return (ramp - 16384) >> 1;
 }
 
-static int32_t waveform_sample(p8p_audio_channel_t *channel, int32_t increment) {
+/* Stateless waveforms 0-5 and 7 (noise needs per-voice state). */
+static inline int32_t basic_waveform(int waveform, uint32_t phase) {
     int32_t sample;
-    uint32_t phase = channel->phase;
-    uint32_t next_phase = phase + (uint32_t)(increment > 0 ? increment : 0);
-    channel->phase = next_phase;
-    switch (channel->waveform) {
+    switch (waveform) {
     case 0: /* triangle */
         return triangle(phase);
     case 1: /* tilted saw (integer approximation) */
@@ -281,7 +331,67 @@ static int32_t waveform_sample(p8p_audio_channel_t *channel, int32_t increment) 
         return (phase < 0x51000000u) ? 8192 : -8192;
     case 5: /* organ */
         return (triangle(phase) + triangle(phase * 2u) / 2) * 2 / 3;
-    case 6: /* noise */
+    case 7: /* phaser */
+        return (triangle(phase) + triangle(phase - phase / 110u)) / 2;
+    default:
+        return 0;
+    }
+}
+
+/*
+ * The "buzz" SFX filter reshapes each waveform.  Formulas from zepto8 via
+ * Fake-08 (WTFPL), measured from PICO-8 exports; they run in float on the
+ * Pocket's FPU and only for SFX that set the filter.  Each result is scaled
+ * to the amplitude of this engine's plain waveform of the same kind.
+ */
+static int32_t buzz_waveform(int waveform, uint32_t phase, int odd_period) {
+    float t = (float)phase * (1.0f / 4294967296.0f);
+    float ret;
+    switch (waveform) {
+    case 0: {
+        float a = 0.875f;
+        float tilted = t < a ? 2.f * t / a - 1.f : 2.f * (1.f - t) / (1.f - a) - 1.f;
+        ret = (1.0f - fabsf(4.f * t - 2.0f)) * 0.75f + tilted * 0.25f;
+        return (int32_t)(ret * 0.5f * 16384.f);
+    }
+    case 1: {
+        float a = 0.975f;
+        ret = t < a ? 2.f * t / a - 1.f : 2.f * (1.f - t) / (1.f - a) - 1.f;
+        return (int32_t)(ret * 0.5f * 16384.f);
+    }
+    case 2: {
+        float advance = t + (odd_period ? 1.f : 0.f);
+        ret = t < 0.5f ? t : t - 1.f;
+        ret = ret * 0.83f - (fabsf(advance - 1.0f) < 0.5f ? 0.085f : 0.0f);
+        return (int32_t)(0.653f * ret * 25090.f);
+    }
+    case 3:
+        return t < 0.4f ? 8192 : -8192;
+    case 4:
+        return t < 0.255f ? 8192 : -8192;
+    case 5:
+        ret = t < 0.5f ? 3.f - fabsf(24.f * t - 6.f) : 1.f - fabsf(16.f * t - 12.f);
+        ret = t < 0.5f ? ret * 2.0f + 3.0f : ret;
+        ret = (t < 0.5f && ret > -1.875f) ? ret * 0.2f - 1.0f : ret + 0.5f;
+        return (int32_t)(ret / 9.f * 24576.f);
+    case 7: {
+        float t2 = fmodf(t * 109.f / 110.f + (odd_period ? 109.f / 110.f : 0.f), 1.f);
+        ret = 2.f - fabsf(8.f * t - 4.f);
+        ret += 1.f - fabsf(4.f * t2 - 2.f);
+        ret += 0.25f - fabsf(fmodf(t * 2.0f + 0.5f, 1.f) - 0.5f);
+        ret += 0.125f - fabsf(0.5f * fmodf(t * 4.0f, 1.f) - 0.25f);
+        return (int32_t)(ret / 6.f * 16384.f);
+    }
+    default:
+        return basic_waveform(waveform, phase);
+    }
+}
+
+static inline int32_t waveform_sample(p8p_audio_channel_t *channel, int32_t increment) {
+    uint32_t phase = channel->phase;
+    uint32_t next_phase = phase + (uint32_t)(increment > 0 ? increment : 0);
+    channel->phase = next_phase;
+    if (channel->waveform == 6) {
         /* Hold a pseudo-random value for one pitch period. */
         if (next_phase < phase) {
             channel->noise ^= channel->noise << 13;
@@ -289,10 +399,194 @@ static int32_t waveform_sample(p8p_audio_channel_t *channel, int32_t increment) 
             channel->noise ^= channel->noise << 5;
         }
         return (int16_t)(channel->noise >> 16) >> 2;
-    case 7: /* phaser */
-        return (triangle(phase) + triangle(phase - phase / 110u)) / 2;
-    default:
-        return 0;
+    }
+    return basic_waveform(channel->waveform, phase);
+}
+
+/* Detune adds a second oscillator at half level; ratios from Fake-08. */
+static uint32_t detune_factor_q16(int waveform, int detune) {
+    switch (waveform) {
+    case 0: return detune == 1 ? 49152u : 98304u;      /* 3/4, 3/2 */
+    case 5: return detune == 1 ? 65865u : 263467u;     /* 200/199, 800/199 */
+    case 7: return detune == 1 ? 64225u : 131731u;     /* 49/50, 400/199 */
+    default: return detune == 1 ? 65865u : 131731u;    /* 200/199, 400/199 */
+    }
+}
+
+/* One voice's sample including the buzz, noiz and detune filters. */
+static inline int32_t voice_sample(p8p_audio_extra_t *extra,
+                            p8p_audio_channel_t *voice, int32_t increment,
+                            uint8_t filters) {
+    uint32_t phase = voice->phase;
+    int buzz = (filters & 4) != 0;
+    int noiz = (filters & 2) != 0;
+    int detune = (filters / 8) % 3;
+    int32_t sample;
+    if (buzz && voice->waveform != 6) {
+        uint32_t next_phase = phase + (uint32_t)(increment > 0 ? increment : 0);
+        voice->phase = next_phase;
+        sample = buzz_waveform(voice->waveform, phase, extra->odd_period);
+        if (next_phase < phase)
+            extra->odd_period ^= 1;
+    } else {
+        sample = waveform_sample(voice, increment);
+        if (noiz && voice->waveform == 6) {
+            /* Sounds a bit like a saw tooth: scale by 2*(t or t-1). */
+            int32_t saw = (int32_t)(phase >> 16);
+            if (saw >= 32768) saw -= 65536;
+            sample = (int32_t)(((int64_t)sample * saw) >> 15);
+        }
+    }
+    if (detune && voice->waveform != 6) {
+        int second_wave = (detune == 2 && voice->waveform == 5) ? 0 : voice->waveform;
+        uint32_t factor = detune_factor_q16(voice->waveform, detune);
+        uint32_t step = (uint32_t)(((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
+                                    factor) >> 16);
+        sample += basic_waveform(second_wave, extra->detune_phase) / 2;
+        extra->detune_phase += step;
+    }
+    return sample;
+}
+
+/* Instantaneous pitch step of a voice, applying vibrato and arpeggios. */
+static inline int32_t voice_increment(p8p_audio_t *audio, p8p_audio_channel_t *voice) {
+    int32_t increment = voice->increment;
+    if (voice->effect == 2) {
+        int32_t lfo = triangle(voice->vibrato_phase);
+        voice->vibrato_phase += 671089u; /* 7.5 Hz */
+        increment += (int32_t)(((int64_t)increment * lfo) >> 19);
+    } else if (voice->effect == 6 || voice->effect == 7) {
+        uint8_t *sfx = sfx_data(audio, voice->sfx);
+        int rate = (sfx[65] <= 8 ? 2 : 1) * (voice->effect == 6 ? 30 : 15);
+        int arp = (int)(voice->sample_in_note /
+                        (P8P_AUDIO_RATE / (unsigned)rate)) & 3;
+        int note = (voice->note & ~3) | arp;
+        uint8_t key = sfx[note * 2] & 0x3f;
+        increment = (int32_t)note_increment[key];
+    }
+    return increment;
+}
+
+static inline void voice_step(p8p_audio_t *audio, p8p_audio_channel_t *voice) {
+    voice->increment += voice->increment_step;
+    voice->volume_q16 += voice->volume_step;
+    if (++voice->sample_in_note >= voice->note_samples)
+        advance_note(audio, voice);
+}
+
+/*
+ * Custom instruments: a note whose custom bit is set plays SFX 0-7 at the
+ * instrument's own speed, loops and effects, transposed by the note's pitch
+ * relative to C-2.  As in Fake-08 it restarts when the parent's instrument or
+ * key changes, when the parent loops or relaunches, or when the instrument
+ * has finished.
+ */
+static void parent_note_started(p8p_audio_t *audio, int index) {
+    p8p_audio_channel_t *channel = &audio->channels[index];
+    p8p_audio_extra_t *extra = &audio->extra[index];
+    uint8_t *sfx = sfx_data(audio, channel->sfx);
+    int custom = (sfx[channel->note * 2 + 1] & 0x80) != 0;
+    int restart = channel->waveform != extra->last_instrument ||
+                  channel->key != extra->last_key ||
+                  channel->sfx != extra->seen_sfx ||
+                  channel->note <= extra->seen_note ||
+                  extra->instrument.sfx < 0;
+    extra->last_instrument = channel->waveform;
+    extra->last_key = channel->key;
+    extra->seen_sfx = channel->sfx;
+    extra->seen_note = channel->note;
+    extra->parent_custom = (uint8_t)(custom && channel->volume > 0);
+    if (extra->parent_custom && restart) {
+        p8p_audio_channel_t *voice = &extra->instrument;
+        memset(voice, 0, sizeof(*voice));
+        voice->sfx = channel->waveform;
+        voice->end_note = 32;
+        voice->can_loop = 1;
+        voice->previous_key = 24;
+        voice->noise = 0x6a09e667u ^ (uint32_t)(index * 0x10203u);
+        configure_note(audio, voice);
+    }
+}
+
+/* Dampen filters: high shelves at 2400 Hz/-6 dB and 1000 Hz/-12 dB. */
+typedef struct p8p_biquad_coefficients {
+    float b0, b1, b2, a1, a2;
+} p8p_biquad_coefficients_t;
+
+static p8p_biquad_coefficients_t damp_coefficients[2];
+static int damp_ready;
+
+static void high_shelf(p8p_biquad_coefficients_t *c, float frequency, float gain) {
+    float w0 = 6.2831853f * frequency / (float)P8P_AUDIO_RATE;
+    float cosw = cosf(w0);
+    float a = powf(10.0f, gain / 40.0f);
+    float alpha = sinf(w0) / 2.0f * sqrtf(2.0f);
+    float sqa = 2.0f * sqrtf(a) * alpha;
+    float a0 = (a + 1) - (a - 1) * cosw + sqa;
+    c->b0 = a * ((a + 1) + (a - 1) * cosw + sqa) / a0;
+    c->b1 = -2 * a * ((a - 1) + (a + 1) * cosw) / a0;
+    c->b2 = a * ((a + 1) + (a - 1) * cosw - sqa) / a0;
+    c->a1 = 2 * ((a - 1) - (a + 1) * cosw) / a0;
+    c->a2 = ((a + 1) - (a - 1) * cosw - sqa) / a0;
+}
+
+static int32_t run_biquad(p8p_biquad_t *state, const p8p_biquad_coefficients_t *c,
+                          int32_t input) {
+    float x = (float)input;
+    float y = c->b0 * x + c->b1 * state->x1 + c->b2 * state->x2 -
+              c->a1 * state->y1 - c->a2 * state->y2;
+    state->x2 = state->x1;
+    state->x1 = x;
+    state->y2 = state->y1;
+    state->y1 = y;
+    return (int32_t)y;
+}
+
+/* Reverb and dampen for one channel's contribution to the mix. */
+static int32_t channel_effects(p8p_audio_t *audio, int index, int32_t value,
+                               uint8_t filters) {
+    p8p_audio_extra_t *extra = &audio->extra[index];
+    int reverb = (filters / 24) % 3;
+    int dampen = (filters / 72) % 3;
+    uint8_t hw_reverb = audio->ram[0x5f41];
+    uint8_t hw_lowpass = audio->ram[0x5f43];
+    int reverb_short = reverb == 1 || (hw_reverb & (1u << (index + 4)));
+    int reverb_long = reverb == 2 || (hw_reverb & (1u << index));
+    int damp1 = dampen == 1 || (hw_lowpass & (1u << (index + 4)));
+    int damp2 = dampen == 2 || (hw_lowpass & (1u << index));
+    uint32_t short_slot = extra->reverb_index % P8P_REVERB_SHORT;
+    uint32_t long_slot = extra->reverb_index % P8P_REVERB_LONG;
+    if (reverb_short)
+        value += extra->reverb_short[short_slot] / 2;
+    if (reverb_long)
+        value += extra->reverb_long[long_slot] / 2;
+    int32_t stored = value > 32767 ? 32767 : value < -32768 ? -32768 : value;
+    extra->reverb_short[short_slot] = (int16_t)stored;
+    extra->reverb_long[long_slot] = (int16_t)stored;
+    ++extra->reverb_index;
+    if (damp1 || damp2) {
+        if (!damp_ready) {
+            high_shelf(&damp_coefficients[0], 2400.0f, -6.0f);
+            high_shelf(&damp_coefficients[1], 1000.0f, -12.0f);
+            damp_ready = 1;
+        }
+        if (damp1)
+            value = run_biquad(&extra->damp1, &damp_coefficients[0], value);
+        if (damp2)
+            value = run_biquad(&extra->damp2, &damp_coefficients[1], value);
+    }
+    return value;
+}
+
+static void reset_extra(p8p_audio_t *audio) {
+    memset(audio->extra, 0, sizeof(audio->extra));
+    audio->pcm_read = audio->pcm_count = audio->pcm_phase = 0;
+    for (int channel = 0; channel < P8P_AUDIO_CHANNELS; ++channel) {
+        audio->extra[channel].instrument.sfx = -1;
+        audio->extra[channel].seen_sfx = -1;
+        audio->extra[channel].seen_note = -1;
+        audio->extra[channel].last_instrument = 0xff;
+        audio->extra[channel].last_key = 0xff;
     }
 }
 
@@ -317,6 +611,7 @@ void p8p_audio_reset(p8p_audio_t *audio, uint8_t *ram) {
     audio->music_volume_q24 = 1 << 24;
     for (int channel = 0; channel < 4; ++channel)
         audio->channels[channel].sfx = -1;
+    reset_extra(audio);
 }
 
 int p8p_audio_sfx(p8p_audio_t *audio, int sfx, int channel,
@@ -410,6 +705,17 @@ int p8p_audio_music_count(const p8p_audio_t *audio) {
     return audio ? audio->music_count : -1;
 }
 
+int p8p_audio_music_ticks(const p8p_audio_t *audio) {
+    uint32_t total, played;
+    if (!audio || !audio->ram || audio->music_pattern < 0)
+        return -1;
+    /* Ticks of 183/22050 s since the pattern started, as stat(26). */
+    total = pattern_duration_samples((p8p_audio_t *)audio, audio->music_pattern);
+    played = total > audio->music_samples_remaining ?
+             total - audio->music_samples_remaining : 0;
+    return (int)(((uint64_t)played * 22050u) / (183u * P8P_AUDIO_RATE));
+}
+
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
     if (!stereo)
         return;
@@ -440,35 +746,66 @@ void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
 
         for (int index = 0; index < 4; ++index) {
             p8p_audio_channel_t *channel = &audio->channels[index];
+            p8p_audio_extra_t *extra = &audio->extra[index];
             int32_t increment;
             int32_t sample;
             int32_t volume;
+            uint8_t filters;
             if (channel->sfx < 0)
                 continue;
-            increment = channel->increment;
-            if (channel->effect == 2) {
-                int32_t lfo = triangle(channel->vibrato_phase);
-                channel->vibrato_phase += 671089u; /* 7.5 Hz */
-                increment += (int32_t)(((int64_t)increment * lfo) >> 19);
-            } else if (channel->effect == 6 || channel->effect == 7) {
-                uint8_t *sfx = sfx_data(audio, channel->sfx);
-                int rate = (sfx[65] <= 8 ? 2 : 1) *
-                           (channel->effect == 6 ? 30 : 15);
-                int arp = (int)(channel->sample_in_note /
-                                (P8P_AUDIO_RATE / (unsigned)rate)) & 3;
-                int note = (channel->note & ~3) | arp;
-                uint8_t key = sfx[note * 2] & 0x3f;
-                increment = (int32_t)note_increment[key];
+            if (channel->sample_in_note == 0)
+                parent_note_started(audio, index);
+            increment = voice_increment(audio, channel);
+            if (extra->parent_custom) {
+                p8p_audio_channel_t *voice = &extra->instrument;
+                if (voice->sfx >= 0) {
+                    /* Transpose by the parent pitch relative to C-2:
+                     * 2^40 / note_increment[24] = 46969 (Q24 reciprocal). */
+                    if (increment != extra->factor_increment) {
+                        extra->factor_increment = increment;
+                        extra->factor_q16 = (uint32_t)(
+                            ((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
+                             46969u) >> 24);
+                    }
+                    int32_t voice_inc = voice_increment(audio, voice);
+                    int32_t scaled = (int32_t)(((int64_t)voice_inc *
+                                                extra->factor_q16) >> 16);
+                    filters = sfx_data(audio, voice->sfx)[64];
+                    sample = voice_sample(extra, voice, scaled, filters);
+                    /* q16 x q16 / 7 without a division: both volumes are
+                     * at most 7 << 16, so the >> 8 product fits 32 bits;
+                     * 9363/65536 ~ 1/7. */
+                    uint32_t product = (uint32_t)(voice->volume_q16 >> 8) *
+                                       (uint32_t)(channel->volume_q16 >> 8);
+                    volume = (int32_t)(((uint64_t)product * 9363u) >> 16);
+                    voice_step(audio, voice);
+                } else {
+                    filters = 0;  /* instrument finished: silent */
+                    sample = 0;
+                    volume = 0;
+                }
+            } else {
+                filters = sfx_data(audio, channel->sfx)[64];
+                sample = voice_sample(extra, channel, increment, filters);
+                volume = channel->volume_q16;
             }
-            sample = waveform_sample(channel, increment);
-            volume = channel->volume_q16;
             if (channel->is_music)
                 volume = (volume >> 8) * (audio->music_volume_q24 >> 16);
-            mix += sample * ((volume + 4096) >> 13) / 56;
-            channel->increment += channel->increment_step;
-            channel->volume_q16 += channel->volume_step;
-            if (++channel->sample_in_note >= channel->note_samples)
-                advance_note(audio, channel);
+            int32_t value = sample * ((volume + 4096) >> 13) / 56;
+            if (filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+                value = channel_effects(audio, index, value, filters);
+            mix += value;
+            voice_step(audio, channel);
+        }
+        if (audio->pcm_count) {
+            /* 8-bit unsigned PCM, held for each 5512.5 Hz sample period. */
+            mix += ((int32_t)audio->pcm[audio->pcm_read] - 128) * 64;
+            uint32_t next_phase = audio->pcm_phase + P8P_PCM_STEP;
+            if (next_phase < audio->pcm_phase) {
+                audio->pcm_read = (audio->pcm_read + 1) % P8P_PCM_CAPACITY;
+                --audio->pcm_count;
+            }
+            audio->pcm_phase = next_phase;
         }
         if (mix > 32767) mix = 32767;
         if (mix < -32768) mix = -32768;
@@ -477,8 +814,44 @@ void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
     }
 }
 
+/* Layout of struct p8p_audio in 0.0.32, whose tail state files contain. */
+typedef struct p8p_audio_v032 {
+    uint8_t *ram;
+    p8p_audio_channel_t channels[P8P_AUDIO_CHANNELS];
+    int music_pattern;
+    int music_count;
+    uint8_t music_mask;
+    uint32_t music_samples_remaining;
+    int32_t music_volume_q24;
+    int32_t music_fade_step;
+} p8p_audio_v032_t;
+
+#define P8P_AUDIO_V032_STATE_SIZE \
+    (sizeof(p8p_audio_v032_t) - offsetof(p8p_audio_v032_t, channels))
+
+P8P_STATIC_ASSERT(offsetof(p8p_audio_t, extra) - offsetof(p8p_audio_t, channels) >=
+               P8P_AUDIO_V032_STATE_SIZE,
+               "saved audio state must not overlap the unsaved extra state");
+
+int p8p_audio_pcm_push(p8p_audio_t *audio, const uint8_t *samples, int count) {
+    int queued = 0;
+    if (!audio || !samples)
+        return 0;
+    while (queued < count && audio->pcm_count < P8P_PCM_CAPACITY) {
+        uint32_t slot = (audio->pcm_read + audio->pcm_count) % P8P_PCM_CAPACITY;
+        audio->pcm[slot] = samples[queued++];
+        ++audio->pcm_count;
+    }
+    return queued;
+}
+
+int p8p_audio_pcm_queued(const p8p_audio_t *audio) {
+    return audio ? (int)audio->pcm_count : 0;
+}
+
 size_t p8p_audio_state_size(void) {
-    return sizeof(p8p_audio_t) - offsetof(p8p_audio_t, channels);
+    /* The channels and music state, exactly as 0.0.32 saved them. */
+    return P8P_AUDIO_V032_STATE_SIZE;
 }
 
 int p8p_audio_save_state(const p8p_audio_t *audio, void *destination,
@@ -497,5 +870,6 @@ int p8p_audio_load_state(p8p_audio_t *audio, uint8_t *ram,
         return -1;
     memcpy(&audio->channels, source, expected);
     audio->ram = ram;
+    reset_extra(audio);
     return 0;
 }
