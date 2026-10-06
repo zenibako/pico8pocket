@@ -109,6 +109,9 @@ Local hardware-test build.
 - `stat(26)`/`stat(56)` report the ticks played in the current music
   pattern. The piconiccc demo synchronises its scenes to them and stopped
   with an error.
+- `trace()` returns its message and `cstore()` is accepted as a no-op, like
+  Fake-08. Pirates Trial crashed in `trace`. Both are numbered after the
+  existing built-ins, so earlier save states still load.
 - An inverted clip rectangle no longer produces negative-length spans; Snail
   crashed on it.
 

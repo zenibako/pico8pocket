@@ -2306,6 +2306,17 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
+/* trace([message]) returns a stack trace in PICO-8; the Lua debug library
+ * is hidden here, so only the message comes back. */
+static int api_trace(lua_State *lua) {
+    int index = lua_type(lua, 1) == LUA_TTHREAD ? 2 : 1;
+    if (lua_type(lua, index) == LUA_TSTRING)
+        lua_pushvalue(lua, index);
+    else
+        lua_pushliteral(lua, "");
+    return 1;
+}
+
 /* serial(channel, address, length).  Only 0x808, PICO-8's 8-bit 5512.5 Hz
  * PCM output, is implemented; other channels consume nothing. */
 static int api_serial(lua_State *lua) {
@@ -2435,6 +2446,13 @@ static const luaL_Reg runtime_api[] = {
     {"foreach", api_foreach}, {NULL, NULL}
 };
 
+/* Added after 0.0.33's first save-state format: numbered last by
+ * eris.__p8p_init so existing permanent-object IDs do not move. Keep in
+ * sync with the list in that function. */
+static const luaL_Reg late_runtime_api[] = {
+    {"cstore", api_stub}, {"trace", api_trace}, {NULL, NULL}
+};
+
 static void register_pico8_button_constants(lua_State *lua) {
     static const uint8_t pico8_names[6] = {
         0x8b, /* left */
@@ -2485,13 +2503,15 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local keys={} for k in pairs(_G) do keys[#keys+1]=k end table.sort(keys)\n"
+    " local late={'cstore','trace'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"
     "  if seen[v] then return end seen[v]=true n+=1 eris.__p8p_perm[v]=n eris.__p8p_unperm[n]=v\n"
     "  if t=='table' and v~=_G and v~=eris then for k,x in pairs(v) do permanent(k) permanent(x) end permanent(getmetatable(v)) end\n"
     " end\n"
     " for i,k in ipairs(keys) do local v=_G[k] permanent(v) eris.__p8p_original[k]=v end\n"
+    " for i,k in ipairs(late) do local v=_G[k] permanent(v) eris.__p8p_original[k]=v end\n"
     "end\n"
     "function eris.__p8p_save()\n"
     " local changed={} for k,v in pairs(_G) do if eris.__p8p_original[k]~=v then changed[k]=v end end\n"
@@ -2513,6 +2533,8 @@ static void set_error(p8p_runtime_t *runtime, const char *prefix) {
 
 static void register_api(lua_State *lua) {
     for (const luaL_Reg *entry = runtime_api; entry->name; ++entry)
+        lua_register(lua, entry->name, entry->func);
+    for (const luaL_Reg *entry = late_runtime_api; entry->name; ++entry)
         lua_register(lua, entry->name, entry->func);
 }
 
