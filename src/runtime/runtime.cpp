@@ -2412,7 +2412,10 @@ static int api_all_next(lua_State *lua) {
     int index;
     lua_number2int(index, nvalue(index_value));
     const TValue *slot = luaH_getint(table, index);
-    if (luaV_rawequalobj(slot, previous))
+    /* Items are usually tables, whose raw equality is identity. */
+    if (ttistable(slot) && ttistable(previous) ?
+            hvalue(slot) == hvalue(previous) :
+            luaV_rawequalobj(slot, previous))
         slot = luaH_getint(table, ++index);
     if (ttisnil(slot)) {
         int length = luaH_getn(table);

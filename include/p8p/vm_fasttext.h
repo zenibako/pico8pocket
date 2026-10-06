@@ -29,9 +29,10 @@ OF_FASTTEXT int luaD_poscall(struct lua_State *lua,
 /* luaV_gettable/luaV_settable are now only the slow path behind the inline
  * table fast path (patches/z8lua-vm-fastpath.patch); their BRAM goes to the
  * larger luaV_execute instead. */
-OF_FASTTEXT int luaV_equalobj_(struct lua_State *lua,
-                               const struct lua_TValue *left,
-                               const struct lua_TValue *right);
+/* luaV_equalobj_ now only handles tables, userdata and long strings: OP_EQ
+ * compares numbers, nil, booleans and short strings inline
+ * (patches/z8lua-eq-fastpath.patch), so its BRAM went to the __index chain
+ * call sites. */
 OF_FASTTEXT int luaV_lessthan(struct lua_State *lua,
                               const struct lua_TValue *left,
                               const struct lua_TValue *right);

@@ -402,6 +402,12 @@ int main(void) {
         "local n=0 for v in all(split(false,\",\")) do n+=1 end if n==0 and split(nil)==nil and #split(\"1,2\")==2 and split(12)[1]==12 then pset(16,2,7) end\n"
         "local m={__eq=function() return true end} local ta,tb=setmetatable({},m),setmetatable({},m) local sa=\"ab\" local sb=\"a\"..\"b\"\n"
         "if 1==1.0 and 2~=3 and sa==sb and sa~=\"ac\" and nil~=false and false==false and true~=false and ta==tb and {}~={} and ta==ta then pset(17,2,7) end\n"
+        "local A={x=1} local B=setmetatable({y=2},{__index=A}) local C=setmetatable({},{__index=B})\n"
+        "local F=setmetatable({},{__index=function(t,k) return k..\"!\" end})\n"
+        "local H=setmetatable({[0.5]=\"half\"},{__index={[0.5]=\"wrong\"}})\n"
+        "local D=C for i=1,6 do D=setmetatable({},{__index=D}) end\n"
+        "local E=setmetatable({},{__index=_ENV}) local function inenv() local _ENV=E return x==nil and pset~=nil end\n"
+        "if C.x==1 and C.y==2 and C.z==nil and F.q==\"q!\" and H[0.5]==\"half\" and D.x==1 and inenv() then pset(18,2,7) end\n"
         "lc=5 do local lc*=2 local ls=\"a\" local ls..=\"b\" if lc==10 and ls==\"ab\" then pset(14,2,7) end end\n"
         "if lc~=5 then pset(14,2,0) end\n"
         "end\n";
@@ -663,7 +669,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 17; ++check) {
+        for (int check = 1; check <= 18; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);

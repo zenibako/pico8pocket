@@ -35,6 +35,12 @@
   compressor's worst case for the raw size, so any state over ~256 KB raw
   was refused even though it compresses far smaller: Moss Moss's ~500 KB
   state takes 84 KB.
+- Global names read inside `local _ENV=obj` code that miss the object and
+  resolve through its `__index` table are found without leaving the
+  interpreter loop. Moss Moss, which runs its objects this way, needs 4.4%
+  fewer host instructions per frame; field reads and `__index` functions
+  (Celeste 2) are unaffected. `luaV_equalobj_` moved out of BRAM to make
+  room, as `==` no longer needs it for common types.
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
