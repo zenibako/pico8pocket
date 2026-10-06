@@ -720,6 +720,10 @@ static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
         return;
     if (x0 < runtime->clip_x0) x0 = runtime->clip_x0;
     if (x1 >= runtime->clip_x1) x1 = runtime->clip_x1 - 1;
+    /* A clip rectangle whose left edge is past its right edge (for example
+     * clip() starting beyond the screen) is empty. */
+    if (x0 > x1)
+        return;
 
     if (!runtime->fill_pattern) {
         uint8_t mapped = runtime->draw_palette[color & 15] & 15;
