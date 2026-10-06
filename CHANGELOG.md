@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.0.33 — 2026-10-06
+
+Local hardware-test build.
 
 ### Highlights
 
@@ -87,6 +89,27 @@ Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
 changes cut host instructions per gameplay frame by 26% with byte-identical
 output.
+
+### Measured on Pocket hardware
+
+Profiler readings from test builds during development (U/D in ms):
+
+| Cart | Before | After |
+| --- | --- | --- |
+| Tetyis (gameplay) | L20 V5, U24 D73 | L32 V8, U15 D58 |
+| Kiloman (stage) | crashed on load | L40 V10, U4 D48 |
+
+Moss Moss runs from its `.p8.png`; the multi-platform export ZIP that
+contains it cannot be loaded directly.
+
+### Known limitations
+
+- Custom SFX instruments and the noise/buzz/detune/reverb/dampen filters are
+  not implemented yet, so music that uses them (23 of Kiloman's 59 SFX) plays
+  plain waveforms instead.
+- The PICO-8 pause menu and `menuitem()` entries are not available.
+- Save-state persistence, `cartdata`, cartridge selection and menu input need
+  a physical Pocket regression pass on the new API 0.9.0 runtime.
 
 ## 0.0.32 — 2026-08-22
 
