@@ -171,13 +171,40 @@ void p8p_platform_present(const uint8_t *framebuffer, const uint8_t *palette) {
     of_video_flip();
 }
 
+/* Audio is topped up once per main-loop pass.  Keep about 1.5x the time
+ * between passes queued so long frames in CPU-heavy carts do not drain the
+ * ring, while fast carts keep the original ~43 ms of latency. */
+#define AUDIO_QUEUE_MIN 2048
+#define AUDIO_QUEUE_MAX 8192
+static int audio_target_frames = AUDIO_QUEUE_MIN;
+static uint32_t audio_last_pump_us;
+
+static void update_audio_target(void) {
+    uint32_t now = of_time_us();
+    if (audio_last_pump_us) {
+        uint32_t gap_us = now - audio_last_pump_us;
+        if (gap_us > 1000000u)
+            gap_us = 1000000u;
+        int wanted = (int)(gap_us * 48u / 1000u) * 3 / 2;
+        if (wanted < AUDIO_QUEUE_MIN) wanted = AUDIO_QUEUE_MIN;
+        if (wanted > AUDIO_QUEUE_MAX) wanted = AUDIO_QUEUE_MAX;
+        if (wanted > audio_target_frames)
+            audio_target_frames = wanted;  /* grow at once */
+        else
+            audio_target_frames -= (audio_target_frames - wanted) / 32;
+    }
+    audio_last_pump_us = now;
+}
+
 void p8p_platform_audio_pump(p8p_runtime_t *runtime) {
-    const int target_queued_frames = 2048;
+    int target_queued_frames;
     int free_frames;
     int queued_frames;
 
     if (!runtime || audio_ring_capacity <= 0)
         return;
+    update_audio_target();
+    target_queued_frames = audio_target_frames;
     free_frames = of_audio_free();
     if (free_frames <= 0)
         return;

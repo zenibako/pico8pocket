@@ -880,8 +880,15 @@ static int api_circ(lua_State *lua) {
 }
 
 static int api_spr(lua_State *lua) {
+    int sprite = arg_int(lua, 1, 0);
+    if (sprite < 0) {
+        /* Carts such as Kiloman use -1 as "no sprite"; PICO-8 draws nothing
+         * rather than out-of-sheet pixels. */
+        profile_api(P8P_API_SPRITE);
+        return 0;
+    }
     flush_redirected_drawing(active_runtime);
-    draw_sprite(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
+    draw_sprite(active_runtime, sprite, arg_int(lua, 2, 0),
                 arg_int(lua, 3, 0), arg_int(lua, 4, 1), arg_int(lua, 5, 1),
                 lua_toboolean(lua, 6), lua_toboolean(lua, 7));
     return 0;

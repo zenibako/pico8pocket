@@ -246,6 +246,8 @@ int main(void) {
         "print(\"\\6!4300AB\") if peek(0x4300)==65 and peek(0x4301)==66 then pset(5,2,7) end\n"
         "poke(0x5f55,0) pset(1,1,9) poke(0x5f55,0x60)\n"
         "if sget(1,1)==9 and pget(1,1)==0 then pset(6,2,7) end\n"
+        "palt(2) rectfill(60,60,75,67,3) spr(-1,60,60,2,1) palt()\n"
+        "if pget(60,60)==3 and pget(75,67)==3 then pset(7,2,7) end\n"
         "end\n";
     CHECK(p8p_cart_load_text_memory(text_engine_source,
                                     sizeof(text_engine_source) - 1,
@@ -452,7 +454,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 6; ++check) {
+        for (int check = 1; check <= 7; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);

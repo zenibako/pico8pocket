@@ -68,6 +68,13 @@
   32767 directly instead of through `strtod` (exactly equivalent; checked
   against `strtod` for every integer string from -99999 to 99999).
 
+- `spr()` with a negative sprite number draws nothing. Kiloman uses `-1`
+  as "no sprite", which previously painted a black box under the player
+  while shooting.
+- The audio queue adapts to the frame time: it keeps about 1.5x the time
+  between top-ups queued (43-170 ms), so slow frames no longer drain the
+  buffer and make music stutter, while fast carts keep the low latency.
+
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
 changes cut host instructions per gameplay frame by 26% with byte-identical
