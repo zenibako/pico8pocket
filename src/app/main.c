@@ -335,6 +335,7 @@ int main(int argc, char **argv) {
     int diagnostics_visible = 0;
     int render_divisor = 1;
     int render_phase = 0;
+    int probe_frames = 0;
     int overload_frames = 0;
     int recovery_frames = 0;
     char runtime_error[256] = {0};
@@ -485,6 +486,7 @@ int main(int argc, char **argv) {
                     runtime_failed = 0;
                     runtime_error[0] = '\0';
                     render_divisor = 1;
+                    probe_frames = 0;
                     render_phase = 0;
                     overload_frames = 0;
                     recovery_frames = 0;
@@ -527,8 +529,19 @@ int main(int argc, char **argv) {
                 drew_game_frame = render_phase == 0;
                 render_phase = (render_phase + 1) % render_divisor;
             } else {
+                uint32_t period_us = target_fps == 30 ? 33333u : 16667u;
                 drew_game_frame = 1;
                 render_phase = 0;
+                /* Update-only cost is measured only on frames that skip
+                 * drawing.  A spike (Kiloman loads a room inside _update)
+                 * can push the estimate high enough to select divisor 1,
+                 * which then never measures it again.  While still over
+                 * budget, skip one draw in 15 to refresh it. */
+                if (average_draw_runtime_us > period_us &&
+                    ++probe_frames >= 15) {
+                    probe_frames = 0;
+                    drew_game_frame = 0;
+                }
             }
             if (p8p_runtime_step_with_draw(runtime, buttons,
                                            drew_game_frame) != 0) {
@@ -549,6 +562,11 @@ int main(int argc, char **argv) {
             if (drew_game_frame)
                 average_draw_runtime_us = smooth_time(
                     average_draw_runtime_us, runtime_us);
+            else if (render_divisor == 1 &&
+                     runtime_us < average_update_runtime_us)
+                /* A probe: let a stale spike decay quickly. */
+                average_update_runtime_us =
+                    (average_update_runtime_us + runtime_us) / 2u;
             else
                 average_update_runtime_us = smooth_time(
                     average_update_runtime_us, runtime_us);

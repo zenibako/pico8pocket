@@ -12,7 +12,11 @@
 #endif
 
 #define P8P_AUDIO_CHANNELS 4
+/* Output rate.  Voices are synthesized at half of it, close to PICO-8's own
+ * 22050 Hz, and each synthesized sample is interpolated to two outputs; this
+ * halves the per-channel work. */
 #define P8P_AUDIO_RATE 48000u
+#define P8P_SYNTH_RATE 24000u
 #define P8P_SFX_BASE 0x3200u
 #define P8P_MUSIC_BASE 0x3100u
 #define P8P_SFX_BYTES 68u
@@ -42,12 +46,12 @@ typedef struct p8p_audio_channel {
 
 /* PCM samples buffered from serial(0x808), about 0.74 s at 5512.5 Hz. */
 #define P8P_PCM_CAPACITY 4096u
-/* 5512.5 / 48000 as a 32-bit phase step. */
-#define P8P_PCM_STEP 493250560u
+/* 5512.5 / 24000 as a 32-bit phase step. */
+#define P8P_PCM_STEP 986501120u
 
 /* PICO-8 reverb delays are 366 and 732 samples at 22050 Hz. */
-#define P8P_REVERB_SHORT 797
-#define P8P_REVERB_LONG 1594
+#define P8P_REVERB_SHORT 398
+#define P8P_REVERB_LONG 797
 
 typedef struct p8p_biquad {
     float x1, x2, y1, y2;
@@ -94,9 +98,14 @@ struct p8p_audio {
     uint32_t pcm_read;
     uint32_t pcm_count;
     uint32_t pcm_phase;
+    /* Output interpolation: the last synthesized sample, and whether the
+     * next output frame is the second of its pair.  Not serialized. */
+    int32_t held_sample;
+    uint8_t second_output;
 };
 
-/* 440 * 2^((key - 33) / 12), converted to a 32-bit phase step at 48 kHz. */
+/* 440 * 2^((key - 33) / 12), converted to a 32-bit phase step at 48 kHz;
+ * NOTE_INCREMENT doubles it for the 24 kHz synthesis rate. */
 static const uint32_t note_increment[64] = {
     5852465u, 6200470u, 6569170u, 6959793u, 7373644u, 7812103u, 8276635u, 8768789u,
     9290209u, 9842633u, 10427907u, 11047982u, 11704930u, 12400941u, 13138339u, 13919586u,
@@ -108,13 +117,15 @@ static const uint32_t note_increment[64] = {
     148643341u, 157482134u, 166846509u, 176767719u, 187278874u, 198415056u, 210213429u, 222713370u
 };
 
+#define NOTE_INCREMENT(key) ((int32_t)(note_increment[key] << 1))
+
 static uint8_t *sfx_data(p8p_audio_t *audio, int sfx) {
     return audio->ram + P8P_SFX_BASE + (unsigned)sfx * P8P_SFX_BYTES;
 }
 
 static uint32_t samples_per_note(uint8_t speed) {
     uint32_t actual_speed = speed ? speed : 1u;
-    return (actual_speed * 183u * P8P_AUDIO_RATE + 11025u) / 22050u;
+    return (actual_speed * 183u * P8P_SYNTH_RATE + 11025u) / 22050u;
 }
 
 static int last_audible_note(const uint8_t *sfx) {
@@ -151,14 +162,14 @@ static void configure_note(p8p_audio_t *audio, p8p_audio_channel_t *channel) {
     channel->effect = (high >> 4) & 7;
     channel->note_samples = samples_per_note(sfx[65]);
     channel->sample_in_note = 0;
-    target_increment = (int32_t)note_increment[channel->key];
+    target_increment = NOTE_INCREMENT(channel->key);
     target_volume = (int32_t)channel->volume << 16;
     channel->increment_step = 0;
     channel->volume_step = 0;
 
     switch (channel->effect) {
     case 1: /* slide from the previous note */
-        channel->increment = (int32_t)note_increment[channel->previous_key];
+        channel->increment = NOTE_INCREMENT(channel->previous_key);
         channel->increment_step =
             (target_increment - channel->increment) / (int32_t)channel->note_samples;
         channel->volume_q16 = channel->previous_volume ?
@@ -261,7 +272,7 @@ static uint32_t pattern_duration_samples(p8p_audio_t *audio, int pattern) {
     }
     int units = duration_nonlooping > 0 ? duration_nonlooping : duration_looping;
     if (units <= 0) units = 32;
-    return (uint32_t)(((uint64_t)(unsigned)units * 183u * P8P_AUDIO_RATE + 11025u) /
+    return (uint32_t)(((uint64_t)(unsigned)units * 183u * P8P_SYNTH_RATE + 11025u) /
                       22050u);
 }
 
@@ -453,16 +464,16 @@ static inline int32_t voice_increment(p8p_audio_t *audio, p8p_audio_channel_t *v
     int32_t increment = voice->increment;
     if (voice->effect == 2) {
         int32_t lfo = triangle(voice->vibrato_phase);
-        voice->vibrato_phase += 671089u; /* 7.5 Hz */
+        voice->vibrato_phase += 1342177u; /* 7.5 Hz */
         increment += (int32_t)(((int64_t)increment * lfo) >> 19);
     } else if (voice->effect == 6 || voice->effect == 7) {
         uint8_t *sfx = sfx_data(audio, voice->sfx);
         int rate = (sfx[65] <= 8 ? 2 : 1) * (voice->effect == 6 ? 30 : 15);
         int arp = (int)(voice->sample_in_note /
-                        (P8P_AUDIO_RATE / (unsigned)rate)) & 3;
+                        (P8P_SYNTH_RATE / (unsigned)rate)) & 3;
         int note = (voice->note & ~3) | arp;
         uint8_t key = sfx[note * 2] & 0x3f;
-        increment = (int32_t)note_increment[key];
+        increment = NOTE_INCREMENT(key);
     }
     return increment;
 }
@@ -517,7 +528,7 @@ static p8p_biquad_coefficients_t damp_coefficients[2];
 static int damp_ready;
 
 static void high_shelf(p8p_biquad_coefficients_t *c, float frequency, float gain) {
-    float w0 = 6.2831853f * frequency / (float)P8P_AUDIO_RATE;
+    float w0 = 6.2831853f * frequency / (float)P8P_SYNTH_RATE;
     float cosw = cosf(w0);
     float a = powf(10.0f, gain / 40.0f);
     float alpha = sinf(w0) / 2.0f * sqrtf(2.0f);
@@ -581,6 +592,8 @@ static int32_t channel_effects(p8p_audio_t *audio, int index, int32_t value,
 static void reset_extra(p8p_audio_t *audio) {
     memset(audio->extra, 0, sizeof(audio->extra));
     audio->pcm_read = audio->pcm_count = audio->pcm_phase = 0;
+    audio->held_sample = 0;
+    audio->second_output = 0;
     for (int channel = 0; channel < P8P_AUDIO_CHANNELS; ++channel) {
         audio->extra[channel].instrument.sfx = -1;
         audio->extra[channel].seen_sfx = -1;
@@ -664,14 +677,14 @@ void p8p_audio_music(p8p_audio_t *audio, int pattern, int fade_ms, int mask) {
         return;
     audio->music_mask = (uint8_t)(mask & 15);
     if (pattern < 0 && fade_ms > 0) {
-        uint32_t samples = (uint32_t)fade_ms * 48u;
+        uint32_t samples = (uint32_t)fade_ms * (P8P_SYNTH_RATE / 1000u);
         audio->music_fade_step = -(audio->music_volume_q24 / (int32_t)samples);
         if (audio->music_fade_step == 0)
             audio->music_fade_step = -1;
         return;
     }
     if (pattern >= 0 && fade_ms > 0) {
-        uint32_t samples = (uint32_t)fade_ms * 48u;
+        uint32_t samples = (uint32_t)fade_ms * (P8P_SYNTH_RATE / 1000u);
         audio->music_volume_q24 = 0;
         audio->music_fade_step = (1 << 24) / (int32_t)samples;
         if (audio->music_fade_step == 0)
@@ -713,7 +726,97 @@ int p8p_audio_music_ticks(const p8p_audio_t *audio) {
     total = pattern_duration_samples((p8p_audio_t *)audio, audio->music_pattern);
     played = total > audio->music_samples_remaining ?
              total - audio->music_samples_remaining : 0;
-    return (int)(((uint64_t)played * 22050u) / (183u * P8P_AUDIO_RATE));
+    return (int)(((uint64_t)played * 22050u) / (183u * P8P_SYNTH_RATE));
+}
+
+/* One mono sample at P8P_SYNTH_RATE: all four channels plus PCM. */
+static int32_t synthesize(p8p_audio_t *audio) {
+    int32_t mix = 0;
+    if (audio->music_pattern >= 0) {
+        if (audio->music_samples_remaining == 0)
+            advance_music(audio);
+        if (audio->music_samples_remaining)
+            --audio->music_samples_remaining;
+    }
+    if (audio->music_fade_step) {
+        audio->music_volume_q24 += audio->music_fade_step;
+        if (audio->music_volume_q24 <= 0) {
+            audio->music_volume_q24 = 0;
+            audio->music_fade_step = 0;
+            start_music_pattern(audio, -1);
+        } else if (audio->music_volume_q24 >= (1 << 24)) {
+            audio->music_volume_q24 = 1 << 24;
+            audio->music_fade_step = 0;
+        }
+    }
+
+    for (int index = 0; index < 4; ++index) {
+        p8p_audio_channel_t *channel = &audio->channels[index];
+        p8p_audio_extra_t *extra = &audio->extra[index];
+        int32_t increment;
+        int32_t sample;
+        int32_t volume;
+        uint8_t filters;
+        if (channel->sfx < 0)
+            continue;
+        if (channel->sample_in_note == 0)
+            parent_note_started(audio, index);
+        increment = voice_increment(audio, channel);
+        if (extra->parent_custom) {
+            p8p_audio_channel_t *voice = &extra->instrument;
+            if (voice->sfx >= 0) {
+                /* Transpose by the parent pitch relative to C-2:
+                 * 2^40 / note_increment[24] = 46969 (Q24 reciprocal),
+                 * one more shift for the doubled NOTE_INCREMENT. */
+                if (increment != extra->factor_increment) {
+                    extra->factor_increment = increment;
+                    extra->factor_q16 = (uint32_t)(
+                        ((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
+                         46969u) >> 25);
+                }
+                int32_t voice_inc = voice_increment(audio, voice);
+                int32_t scaled = (int32_t)(((int64_t)voice_inc *
+                                            extra->factor_q16) >> 16);
+                filters = sfx_data(audio, voice->sfx)[64];
+                sample = voice_sample(extra, voice, scaled, filters);
+                /* q16 x q16 / 7 without a division: both volumes are
+                 * at most 7 << 16, so the >> 8 product fits 32 bits;
+                 * 9363/65536 ~ 1/7. */
+                uint32_t product = (uint32_t)(voice->volume_q16 >> 8) *
+                                   (uint32_t)(channel->volume_q16 >> 8);
+                volume = (int32_t)(((uint64_t)product * 9363u) >> 16);
+                voice_step(audio, voice);
+            } else {
+                filters = 0;  /* instrument finished: silent */
+                sample = 0;
+                volume = 0;
+            }
+        } else {
+            filters = sfx_data(audio, channel->sfx)[64];
+            sample = voice_sample(extra, channel, increment, filters);
+            volume = channel->volume_q16;
+        }
+        if (channel->is_music)
+            volume = (volume >> 8) * (audio->music_volume_q24 >> 16);
+        int32_t value = sample * ((volume + 4096) >> 13) / 56;
+        if (filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+            value = channel_effects(audio, index, value, filters);
+        mix += value;
+        voice_step(audio, channel);
+    }
+    if (audio->pcm_count) {
+        /* 8-bit unsigned PCM, held for each 5512.5 Hz sample period. */
+        mix += ((int32_t)audio->pcm[audio->pcm_read] - 128) * 64;
+        uint32_t next_phase = audio->pcm_phase + P8P_PCM_STEP;
+        if (next_phase < audio->pcm_phase) {
+            audio->pcm_read = (audio->pcm_read + 1) % P8P_PCM_CAPACITY;
+            --audio->pcm_count;
+        }
+        audio->pcm_phase = next_phase;
+    }
+    if (mix > 32767) mix = 32767;
+    if (mix < -32768) mix = -32768;
+    return mix;
 }
 
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
@@ -725,92 +828,18 @@ void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
     }
 
     for (size_t frame = 0; frame < frames; ++frame) {
-        int32_t mix = 0;
-        if (audio->music_pattern >= 0) {
-            if (audio->music_samples_remaining == 0)
-                advance_music(audio);
-            if (audio->music_samples_remaining)
-                --audio->music_samples_remaining;
+        int32_t value;
+        if (!audio->second_output) {
+            /* First of the pair: midway from the previous sample. */
+            int32_t sample = synthesize(audio);
+            value = (audio->held_sample + sample) / 2;
+            audio->held_sample = sample;
+        } else {
+            value = audio->held_sample;
         }
-        if (audio->music_fade_step) {
-            audio->music_volume_q24 += audio->music_fade_step;
-            if (audio->music_volume_q24 <= 0) {
-                audio->music_volume_q24 = 0;
-                audio->music_fade_step = 0;
-                start_music_pattern(audio, -1);
-            } else if (audio->music_volume_q24 >= (1 << 24)) {
-                audio->music_volume_q24 = 1 << 24;
-                audio->music_fade_step = 0;
-            }
-        }
-
-        for (int index = 0; index < 4; ++index) {
-            p8p_audio_channel_t *channel = &audio->channels[index];
-            p8p_audio_extra_t *extra = &audio->extra[index];
-            int32_t increment;
-            int32_t sample;
-            int32_t volume;
-            uint8_t filters;
-            if (channel->sfx < 0)
-                continue;
-            if (channel->sample_in_note == 0)
-                parent_note_started(audio, index);
-            increment = voice_increment(audio, channel);
-            if (extra->parent_custom) {
-                p8p_audio_channel_t *voice = &extra->instrument;
-                if (voice->sfx >= 0) {
-                    /* Transpose by the parent pitch relative to C-2:
-                     * 2^40 / note_increment[24] = 46969 (Q24 reciprocal). */
-                    if (increment != extra->factor_increment) {
-                        extra->factor_increment = increment;
-                        extra->factor_q16 = (uint32_t)(
-                            ((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
-                             46969u) >> 24);
-                    }
-                    int32_t voice_inc = voice_increment(audio, voice);
-                    int32_t scaled = (int32_t)(((int64_t)voice_inc *
-                                                extra->factor_q16) >> 16);
-                    filters = sfx_data(audio, voice->sfx)[64];
-                    sample = voice_sample(extra, voice, scaled, filters);
-                    /* q16 x q16 / 7 without a division: both volumes are
-                     * at most 7 << 16, so the >> 8 product fits 32 bits;
-                     * 9363/65536 ~ 1/7. */
-                    uint32_t product = (uint32_t)(voice->volume_q16 >> 8) *
-                                       (uint32_t)(channel->volume_q16 >> 8);
-                    volume = (int32_t)(((uint64_t)product * 9363u) >> 16);
-                    voice_step(audio, voice);
-                } else {
-                    filters = 0;  /* instrument finished: silent */
-                    sample = 0;
-                    volume = 0;
-                }
-            } else {
-                filters = sfx_data(audio, channel->sfx)[64];
-                sample = voice_sample(extra, channel, increment, filters);
-                volume = channel->volume_q16;
-            }
-            if (channel->is_music)
-                volume = (volume >> 8) * (audio->music_volume_q24 >> 16);
-            int32_t value = sample * ((volume + 4096) >> 13) / 56;
-            if (filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
-                value = channel_effects(audio, index, value, filters);
-            mix += value;
-            voice_step(audio, channel);
-        }
-        if (audio->pcm_count) {
-            /* 8-bit unsigned PCM, held for each 5512.5 Hz sample period. */
-            mix += ((int32_t)audio->pcm[audio->pcm_read] - 128) * 64;
-            uint32_t next_phase = audio->pcm_phase + P8P_PCM_STEP;
-            if (next_phase < audio->pcm_phase) {
-                audio->pcm_read = (audio->pcm_read + 1) % P8P_PCM_CAPACITY;
-                --audio->pcm_count;
-            }
-            audio->pcm_phase = next_phase;
-        }
-        if (mix > 32767) mix = 32767;
-        if (mix < -32768) mix = -32768;
-        stereo[frame * 2] = (int16_t)mix;
-        stereo[frame * 2 + 1] = (int16_t)mix;
+        audio->second_output ^= 1;
+        stereo[frame * 2] = (int16_t)value;
+        stereo[frame * 2 + 1] = (int16_t)value;
     }
 }
 
@@ -854,12 +883,47 @@ size_t p8p_audio_state_size(void) {
     return P8P_AUDIO_V032_STATE_SIZE;
 }
 
+/*
+ * Saved states keep 0.0.32's 48 kHz units, so files stay interchangeable
+ * with builds that synthesized at the output rate: sample counts are twice
+ * the synthesis-rate values, per-sample steps half (pitch steps a quarter,
+ * as the pitch itself is halved).
+ */
+static void state_to_saved_units(p8p_audio_v032_t *state) {
+    for (int i = 0; i < P8P_AUDIO_CHANNELS; ++i) {
+        p8p_audio_channel_t *c = &state->channels[i];
+        c->note_samples *= 2;
+        c->sample_in_note *= 2;
+        c->increment /= 2;
+        c->increment_step /= 4;
+        c->volume_step /= 2;
+    }
+    state->music_samples_remaining *= 2;
+    state->music_fade_step /= 2;
+}
+
+static void state_from_saved_units(p8p_audio_v032_t *state) {
+    for (int i = 0; i < P8P_AUDIO_CHANNELS; ++i) {
+        p8p_audio_channel_t *c = &state->channels[i];
+        c->note_samples = (c->note_samples + 1) / 2;
+        c->sample_in_note /= 2;
+        c->increment *= 2;
+        c->increment_step *= 4;
+        c->volume_step *= 2;
+    }
+    state->music_samples_remaining = (state->music_samples_remaining + 1) / 2;
+    state->music_fade_step *= 2;
+}
+
 int p8p_audio_save_state(const p8p_audio_t *audio, void *destination,
                          size_t size) {
     size_t expected = p8p_audio_state_size();
+    p8p_audio_v032_t state;
     if (!audio || !destination || size != expected)
         return -1;
-    memcpy(destination, &audio->channels, expected);
+    memcpy(&state.channels, &audio->channels, expected);
+    state_to_saved_units(&state);
+    memcpy(destination, &state.channels, expected);
     return 0;
 }
 
@@ -868,7 +932,10 @@ int p8p_audio_load_state(p8p_audio_t *audio, uint8_t *ram,
     size_t expected = p8p_audio_state_size();
     if (!audio || !ram || !source || size != expected)
         return -1;
-    memcpy(&audio->channels, source, expected);
+    p8p_audio_v032_t state;
+    memcpy(&state.channels, source, expected);
+    state_from_saved_units(&state);
+    memcpy(&audio->channels, &state.channels, expected);
     audio->ram = ram;
     reset_extra(audio);
     return 0;

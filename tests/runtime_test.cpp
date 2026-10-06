@@ -604,6 +604,26 @@ int main(void) {
         }
 
         {
+            /* Saved states keep 48 kHz units while voices run at 24 kHz: a
+             * looping note must continue at the same pitch after a save and
+             * load (SFX 0, key 24 ~262 Hz: ~105 crossings in 0.2 s). */
+            audio_crossings_for(runtime, "sfx(0)");
+            void *audio_state = NULL;
+            size_t audio_state_size = 0;
+            CHECK(p8p_runtime_save_state(runtime, &audio_state,
+                                         &audio_state_size) == 0);
+            int before = audio_crossings(runtime, 9600);
+            CHECK(p8p_runtime_load_state(runtime, audio_state,
+                                         audio_state_size) == 0);
+            int after = audio_crossings(runtime, 9600);
+            fprintf(stderr, "audio state round trip: %d -> %d crossings\n",
+                    before, after);
+            CHECK(before > 95 && before < 115);
+            CHECK(after >= before - 2 && after <= before + 2);
+            free(audio_state);
+        }
+
+        {
             /* stat(26) counts 183/22050 s ticks into the music pattern:
              * 9600 samples at 48 kHz are 24 ticks. */
             audio_crossings_for(runtime,

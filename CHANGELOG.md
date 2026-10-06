@@ -11,6 +11,17 @@
   screen. Menu entries are not part of save states: loading one keeps the
   entries the cart has set up since it started. Existing save states still
   load.
+- Audio voices are synthesized at 24 kHz (PICO-8 itself runs at 22050 Hz)
+  and interpolated to the 48 kHz output, roughly halving audio CPU: Kiloman's
+  music drops from about 890 to 470 host instructions per output sample,
+  Tetyis by a third. Loudness envelopes and pitch match the previous output
+  (checked on seven carts); save states keep their 48 kHz units, so files
+  move freely between this and earlier builds.
+- Frame skipping no longer gets stuck off. The update-only cost it relies on
+  was only measured on skipped frames, so one slow update (Kiloman loads the
+  next room inside `_update` when you drop into it) could switch skipping
+  off for the rest of the room at about 12 FPS. While a cart is over budget
+  without skipping, one draw in 15 is now skipped to re-measure.
 
 ## 0.0.33 — 2026-10-06
 
