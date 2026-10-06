@@ -26,6 +26,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-upstream-backports.patch"
     "$PROJECT_ROOT/patches/z8lua-vm-fastpath.patch"
     "$PROJECT_ROOT/patches/z8lua-number-parse.patch"
+    "$PROJECT_ROOT/patches/z8lua-local-compound.patch"
 )
 
 fetch_one() {

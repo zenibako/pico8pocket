@@ -112,6 +112,9 @@ Local hardware-test build.
 - `trace()` returns its message and `cstore()` is accepted as a no-op, like
   Fake-08. Pirates Trial crashed in `trace`. Both are numbered after the
   existing built-ins, so earlier save states still load.
+- `local x += 1` and the other compound operators are accepted after
+  `local`, as in PICO-8 (`local x = x + 1` using the enclosing `x`). Space
+  Station Demo and The Lost Night failed to load; Fake-08 rejects them too.
 - An inverted clip rectangle no longer produces negative-length spans; Snail
   crashed on it.
 

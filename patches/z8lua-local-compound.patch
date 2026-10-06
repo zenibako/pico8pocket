@@ -1,0 +1,64 @@
+Accept `local name op= expression' like PICO-8.
+
+PICO-8 compiles `local z /= 64*1.4' as `local z = z / (64*1.4)', with the
+right-hand z resolved before the new local exists. Space Station Demo
+and The Lost Night use it and failed to load.
+
+diff --git a/lparser.c b/lparser.c
+--- a/lparser.c
++++ b/lparser.c
+@@ -295,8 +295,7 @@
+ }
+ 
+ 
+-static void singlevar (LexState *ls, expdesc *var) {
+-  TString *varname = str_checkname(ls);
++static void singlevarname (LexState *ls, TString *varname, expdesc *var) {
+   FuncState *fs = ls->fs;
+   if (singlevaraux(fs, varname, var, 1) == VVOID) {  /* global name? */
+     expdesc key;
+@@ -309,6 +308,11 @@
+ }
+ 
+ 
++static void singlevar (LexState *ls, expdesc *var) {
++  singlevarname(ls, str_checkname(ls), var);
++}
++
++
+ static void adjust_assign (LexState *ls, int nvars, int nexps, expdesc *e) {
+   FuncState *fs = ls->fs;
+   int extra = nvars - nexps;
+@@ -1538,11 +1542,30 @@
+   int nvars = 0;
+   int nexps;
+   expdesc e;
++  TString *name;
+   do {
+-    new_localvar(ls, str_checkname(ls));
++    name = str_checkname(ls);
++    new_localvar(ls, name);
+     nvars++;
+   } while (testnext(ls, ','));
+-  if (testnext(ls, '='))
++  if (nvars == 1 && ls->t.token >= TK_ADDE && ls->t.token <= TK_CONCATE) {
++    /* PICO-8: `local x op= exp' is `local x = x op exp', where the
++       right-hand x is the enclosing variable of that name. */
++    FuncState *fs = ls->fs;
++    BinOpr op = BinOpr(ls->t.token - TK_ADDE + OPR_ADD);
++    expdesc e2;
++    int line;
++    luaX_next(ls);
++    line = ls->linenumber;
++    singlevarname(ls, name, &e);
++    enterlevel(ls);
++      luaK_infix(fs, op, &e);
++      expr(ls, &e2);
++      luaK_posfix(fs, op, &e, &e2, line);
++    leavelevel(ls);
++    nexps = 1;
++  }
++  else if (testnext(ls, '='))
+     nexps = explist(ls, &e);
+   else {
+     e.k = VVOID;
