@@ -1,0 +1,20 @@
+split() of a non-string returns nothing, like PICO-8.
+
+Moss Moss resets its palette with apply_pal(G_colorblind and "4:12,3:135"),
+i.e. split(false, ","), when colorblind mode is off.  PICO-8 returns nothing
+(so all() iterates nothing); z8lua raised "string expected, got boolean".
+
+diff --git a/lpico8lib.c b/lpico8lib.c
+--- a/lpico8lib.c
++++ b/lpico8lib.c
+@@ -332,7 +332,9 @@
+         return 0;
+     }
+ 
+-    if (lua_isnil(l, 1)) {
++    /* Like PICO-8, anything but a string or number (nil, booleans,
++       tables) splits to nothing instead of raising an error. */
++    if (!lua_isstring(l, 1)) {
+         return 0;
+     }
+     size_t count = 0, hlen;

@@ -25,6 +25,9 @@
 - `menuitem(i, label)` without a callback relabels an entry and keeps its
   callback, as in PICO-8. Moss Moss's colorblind toggle could be switched
   on but not off.
+- `split()` of a non-string (`nil`, `false`) returns nothing instead of
+  raising an error, as in PICO-8. Turning Moss Moss's colorblind mode back
+  off stopped the cart with "bad argument #1 to 'split'".
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
