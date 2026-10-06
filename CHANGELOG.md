@@ -28,6 +28,11 @@
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
+- Numbers are converted to text (`tostr`, `print(n)`, `..`) with integer
+  arithmetic instead of a double-precision `sprintf`, which the Pocket's
+  single-precision CPU emulated in software: about 4200 RV32 instructions
+  per number down to about 40. The text is identical (checked for all 2^32
+  values against glibc and against the SDK's musl).
 
 ## 0.0.33 — 2026-10-06
 

@@ -1,0 +1,61 @@
+Format numbers in fixed point instead of sprintf("%1.4f", (double)n).
+
+tostr(), print(n) and every number in a .. concatenation went through a
+double conversion and printf's float formatter; on the Pocket's RV32
+(single-precision FPU only) that is ~4200 instructions per number, ~40
+with integer arithmetic.  The output is identical: compared with glibc
+for all 2^32 fix32 values and with the SDK's musl on full fraction
+sweeps and 20 million random values.
+
+diff --git a/luaconf.h b/luaconf.h
+--- a/luaconf.h
++++ b/luaconf.h
+@@ -589,11 +589,43 @@
+ #define luai_numpeek2(L,a)	(luaV_peek(L,a,2))
+ #define luai_numpeek4(L,a)	(luaV_peek(L,a,4))
+ 
+-#define lua_number2str(s,n) [&]() { \
+-  int i = sprintf(s, "%1.4f", (double)n); \
+-  while (i > 0 && s[i - 1] == '0') s[--i] = '\0'; \
+-  if (i > 0 && s[i - 1] == '.') s[--i] = '\0'; \
+-  return i; }()
++#include <stdint.h>
++/* Same text as the former sprintf(s, "%1.4f", (double)n) with trailing
++ * zeros and a trailing '.' removed, without double arithmetic or printf:
++ * on RV32 without a double FPU that took ~4200 instructions per number.
++ * Checked against glibc for all 2^32 values and against musl. */
++static inline int luai_fix32tostr(char *s, int32_t bits) {
++  char *p = s;
++  uint32_t mag = bits < 0 ? 0u - (uint32_t)bits : (uint32_t)bits;
++  uint32_t whole = mag >> 16;
++  uint32_t scaled = (mag & 0xffffu) * 10000u;  /* < 2^30 */
++  uint32_t frac = scaled >> 16;
++  uint32_t rest = scaled & 0xffffu;
++  char digits[10];
++  int n = 0;
++  /* Round to nearest, ties to even, as printf does for exact values. */
++  if (rest > 0x8000u || (rest == 0x8000u && (frac & 1u)))
++    ++frac;
++  if (frac == 10000u) {
++    frac = 0;
++    ++whole;
++  }
++  if (bits < 0)
++    *p++ = '-';
++  do digits[n++] = (char)('0' + whole % 10u); while (whole /= 10u);
++  while (n) *p++ = digits[--n];
++  if (frac) {
++    *p++ = '.';
++    for (uint32_t div = 1000u; frac; div /= 10u) {
++      *p++ = (char)('0' + frac / div);
++      frac %= div;
++    }
++  }
++  *p = '\0';
++  return (int)(p - s);
++}
++
++#define lua_number2str(s,n) luai_fix32tostr((s), (n).bits())
+ 
+ #define luai_hashnum(i,n) (i = (n * z8::fix32::frombits(2654435769u)).bits())
+ 
