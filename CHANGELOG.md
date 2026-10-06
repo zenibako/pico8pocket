@@ -41,6 +41,11 @@
   fewer host instructions per frame; field reads and `__index` functions
   (Celeste 2) are unaffected. `luaV_equalobj_` moved out of BRAM to make
   room, as `==` no longer needs it for common types.
+- A global name that resolves to nil no longer interns the
+  `"__PICO8_SANDBOX"` string for the env-fallback lookup; the sandbox is
+  read from the registry's globals slot. Celeste 2 does about 360 such
+  lookups per frame and needs 4.4% fewer host instructions per frame; the
+  smaller interpreter loop frees about 760 bytes of BRAM.
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.

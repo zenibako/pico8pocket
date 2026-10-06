@@ -1,0 +1,36 @@
+Read the env-fallback sandbox by registry index, not by name.
+
+Every global name that resolved to nil interned "__PICO8_SANDBOX" with
+luaS_newliteral and looked it up in the registry; Celeste 2 does ~360 such
+lookups per frame (4% of the frame).  The registered sandbox is the
+globals table, registry[LUA_RIDX_GLOBALS], so read that slot directly.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -709,8 +709,10 @@
+         // Note that this was observed in Jan 2026, PICO-8 version 0.2.7, Ex-Terra dated 2024-09-23 fucntion called draw_gbullets_old
+         if ((encoded & (1 << 8)) && ttisnil(ra) && ttisstring(RKC(i))) {
+           Table *reg = hvalue(&G(L)->l_registry);
+-          TString *sandboxKey = luaS_newliteral(L, "__PICO8_SANDBOX");
+-          const TValue *sandbox = luaH_getstr(reg, sandboxKey);
++          /* The sandbox registered as __PICO8_SANDBOX is the globals table
++             (_G at bootstrap), i.e. registry[LUA_RIDX_GLOBALS]; reading it
++             by index avoids interning the key string on every miss. */
++          const TValue *sandbox = luaH_getint(reg, LUA_RIDX_GLOBALS);
+           if (ttistable(sandbox)) {
+             const TValue *sandboxRes = luaH_get(hvalue(sandbox), RKC(i));
+             if (!ttisnil(sandboxRes)) {
+@@ -731,8 +733,10 @@
+         if ((encoded & (1 << 8)) && ttisnil(ra) &&
+             ttisstring(RKC(i)) && ttistable(table)) {
+           Table *reg = hvalue(&G(L)->l_registry);
+-          TString *sandboxKey = luaS_newliteral(L, "__PICO8_SANDBOX");
+-          const TValue *sandbox = luaH_getstr(reg, sandboxKey);
++          /* The sandbox registered as __PICO8_SANDBOX is the globals table
++             (_G at bootstrap), i.e. registry[LUA_RIDX_GLOBALS]; reading it
++             by index avoids interning the key string on every miss. */
++          const TValue *sandbox = luaH_getint(reg, LUA_RIDX_GLOBALS);
+           if (ttistable(sandbox)) {
+             const TValue *sandboxRes = luaH_get(hvalue(sandbox), RKC(i));
+             if (!ttisnil(sandboxRes)) {
