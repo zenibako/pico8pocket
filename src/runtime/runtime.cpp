@@ -576,6 +576,13 @@ static void sprite_set(p8p_runtime_t *runtime, int x, int y, uint8_t color) {
         *packed = (uint8_t)((*packed & 0x0f) | ((color & 0x0f) << 4));
     else
         *packed = (uint8_t)((*packed & 0xf0) | (color & 0x0f));
+    if (range_touches_screen(address, 1)) {
+        /* Drawing is redirected here, so the framebuffer is authoritative.
+         * Write just this pixel: unpacking the whole byte could restore a
+         * stale neighbouring pixel from RAM. */
+        runtime->framebuffer[(address - runtime->draw_target) * 2 + (x & 1)] =
+            color & 0x0f;
+    }
 }
 
 static uint8_t map_get(const p8p_runtime_t *runtime, int x, int y) {
@@ -600,12 +607,11 @@ static void map_set(p8p_runtime_t *runtime, int x, int y, uint8_t value) {
     if (x < 0 || y < 0 || x >= width || y >= height)
         return;
     int index = y * width + x;
-    if (mapping >= 0x80)
-        runtime->ram[(mapping << 8) + index] = value;
-    else if (index < 4096)
-        runtime->ram[0x2000 + index] = value;
-    else
-        runtime->ram[index] = value;
+    int address = mapping >= 0x80 ? (mapping << 8) + index :
+                  index < 4096 ? 0x2000 + index : index;
+    runtime->ram[address] = value;
+    if (range_touches_screen(address, 1))
+        ram_to_screen_range(runtime, address, 1);
 }
 
 static void draw_line(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,

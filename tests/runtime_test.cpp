@@ -253,6 +253,9 @@ int main(void) {
         "poke(0x5f55,0) pset(1,1,9) poke(0x5f55,0x60)\n"
         "if sget(1,1)==9 and pget(1,1)==0 then pset(6,2,7) end\n"
         "palt(2) rectfill(60,60,75,67,3) spr(-1,60,60,2,1) palt()\n"
+        "poke(0x5f55,0) rectfill(0,0,3,3,5) sset(1,1,9) mset(0,32,0x77)\n"
+        "local redirected=sget(1,1)==9 and sget(0,1)==5 and sget(0,64)==7 and sget(1,64)==7\n"
+        "poke(0x5f55,0x60) if redirected and sget(1,1)==9 then pset(8,2,7) end\n"
         "if pget(60,60)==3 and pget(75,67)==3 then pset(7,2,7) end\n"
         "end\n";
     CHECK(p8p_cart_load_text_memory(text_engine_source,
@@ -485,7 +488,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 7; ++check) {
+        for (int check = 1; check <= 8; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);

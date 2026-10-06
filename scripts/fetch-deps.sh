@@ -78,11 +78,16 @@ fetch_sparse() {
         return 1
     fi
 
-    git init -q "$destination"
-    git -C "$destination" remote add origin "$url"
-    git -C "$destination" sparse-checkout set --no-cone "$@"
-    git -C "$destination" fetch --depth 1 --filter=blob:none origin "$commit"
-    git -C "$destination" checkout -q --detach "$commit"
+    # Build in a staging directory so an interrupted fetch never leaves a
+    # partial checkout at the destination.
+    local staging="$destination.partial"
+    rm -rf "$staging"
+    git init -q "$staging"
+    git -C "$staging" remote add origin "$url"
+    git -C "$staging" sparse-checkout set --no-cone "$@"
+    git -C "$staging" fetch --depth 1 --filter=blob:none origin "$commit"
+    git -C "$staging" checkout -q --detach "$commit"
+    mv "$staging" "$destination"
     echo "$name: checked out $commit"
 }
 
