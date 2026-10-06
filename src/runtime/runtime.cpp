@@ -1325,18 +1325,31 @@ static int api_clip(lua_State *lua) {
     return 4;
 }
 
+static void reset_transparency(p8p_runtime_t *runtime) {
+    if (runtime->transparency_default)
+        return;
+    memset(runtime->transparent, 0, sizeof(runtime->transparent));
+    runtime->transparent[0] = 1;
+    for (int color = 0; color < 16; ++color)
+        runtime->ram[0x5f00 + color] = (uint8_t)(
+            runtime->draw_palette[color] | (color == 0 ? 0x10 : 0));
+    runtime->transparency_default = 1;
+}
+
 static int api_pal(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
-        if (runtime->palettes_default)
-            return 0;
-        for (int i = 0; i < 16; ++i) {
-            runtime->draw_palette[i] = (uint8_t)i;
-            runtime->screen_palette[i] = (uint8_t)i;
-            palette_entry_to_ram(runtime, i);
+        /* Like PICO-8, pal() also resets transparency to palt(). */
+        if (!runtime->palettes_default) {
+            for (int i = 0; i < 16; ++i) {
+                runtime->draw_palette[i] = (uint8_t)i;
+                runtime->screen_palette[i] = (uint8_t)i;
+                palette_entry_to_ram(runtime, i);
+            }
+            runtime->palettes_default = 1;
         }
-        runtime->palettes_default = 1;
+        reset_transparency(runtime);
     } else if (lua_istable(lua, 1)) {
         int screen = arg_int(lua, 2, 0) == 1;
         lua_pushnil(lua);
@@ -1379,14 +1392,7 @@ static int api_palt(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (lua_gettop(lua) == 0) {
-        if (runtime->transparency_default)
-            return 0;
-        memset(runtime->transparent, 0, sizeof(runtime->transparent));
-        runtime->transparent[0] = 1;
-        for (int color = 0; color < 16; ++color)
-            runtime->ram[0x5f00 + color] = (uint8_t)(
-                runtime->draw_palette[color] | (color == 0 ? 0x10 : 0));
-        runtime->transparency_default = 1;
+        reset_transparency(runtime);
     } else if (lua_gettop(lua) == 1) {
         /* palt(bitfield): bit 15-i makes colour i transparent. */
         int bits = arg_int(lua, 1, 0) & 0xffff;

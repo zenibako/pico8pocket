@@ -104,6 +104,8 @@ Local hardware-test build.
   `fillp(▒)` no longer clears the pattern.
 - A colour passed to `pset`, `line`, `rect(fill)`, `circ(fill)` or
   `oval(fill)` also becomes the pen colour, as in PICO-8.
+- `pal()` also resets transparency, as in PICO-8. Tetyis's falling piece
+  kept the ghost piece's transparent colour and was drawn as an outline.
 - An inverted clip rectangle no longer produces negative-length spans; Snail
   crashed on it.
 
