@@ -705,6 +705,17 @@ int p8p_audio_music_count(const p8p_audio_t *audio) {
     return audio ? audio->music_count : -1;
 }
 
+int p8p_audio_music_ticks(const p8p_audio_t *audio) {
+    uint32_t total, played;
+    if (!audio || !audio->ram || audio->music_pattern < 0)
+        return -1;
+    /* Ticks of 183/22050 s since the pattern started, as stat(26). */
+    total = pattern_duration_samples((p8p_audio_t *)audio, audio->music_pattern);
+    played = total > audio->music_samples_remaining ?
+             total - audio->music_samples_remaining : 0;
+    return (int)(((uint64_t)played * 22050u) / (183u * P8P_AUDIO_RATE));
+}
+
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
     if (!stereo)
         return;

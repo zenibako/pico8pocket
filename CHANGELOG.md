@@ -106,6 +106,9 @@ Local hardware-test build.
   `oval(fill)` also becomes the pen colour, as in PICO-8.
 - `pal()` also resets transparency, as in PICO-8. Tetyis's falling piece
   kept the ghost piece's transparent colour and was drawn as an outline.
+- `stat(26)`/`stat(56)` report the ticks played in the current music
+  pattern. The piconiccc demo synchronises its scenes to them and stopped
+  with an error.
 - An inverted clip rectangle no longer produces negative-length spans; Snail
   crashed on it.
 

@@ -2243,6 +2243,10 @@ static int api_stat(lua_State *lua) {
     case 55:
         push_int(lua, p8p_audio_music_count(runtime->audio));
         break;
+    case 26:
+    case 56:
+        push_int(lua, p8p_audio_music_ticks(runtime->audio));
+        break;
     case 28:
     case 30:
     case 120:

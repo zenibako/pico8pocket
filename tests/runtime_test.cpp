@@ -594,6 +594,17 @@ int main(void) {
         }
 
         {
+            /* stat(26) counts 183/22050 s ticks into the music pattern:
+             * 9600 samples at 48 kHz are 24 ticks. */
+            audio_crossings_for(runtime,
+                                "music(0) end function _update() "
+                                "t=stat(26) end function _draw() "
+                                "if t==24 then pset(0,0,7) end");
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+        }
+
+        {
             /* serial(0x808) queues 8-bit PCM; stat(108) counts what is left
              * and rendering drains it at 5512.5 Hz (100 samples ~ 871). */
             static const char pcm_source[] =
