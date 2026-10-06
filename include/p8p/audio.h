@@ -21,6 +21,10 @@ int p8p_audio_channel_note(const p8p_audio_t *audio, int channel);
 int p8p_audio_music_pattern(const p8p_audio_t *audio);
 int p8p_audio_music_count(const p8p_audio_t *audio);
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames);
+/* PCM output channel (serial 0x808): 8-bit unsigned samples at 5512.5 Hz.
+ * Returns how many bytes were queued; the rest did not fit. */
+int p8p_audio_pcm_push(p8p_audio_t *audio, const uint8_t *samples, int count);
+int p8p_audio_pcm_queued(const p8p_audio_t *audio);
 size_t p8p_audio_state_size(void);
 int p8p_audio_save_state(const p8p_audio_t *audio, void *destination,
                          size_t size);

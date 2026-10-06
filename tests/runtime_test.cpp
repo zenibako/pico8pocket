@@ -590,6 +590,29 @@ int main(void) {
             CHECK(detuned > 0 && detuned_hash != plain_hash);
         }
 
+        {
+            /* serial(0x808) queues 8-bit PCM; stat(108) counts what is left
+             * and rendering drains it at 5512.5 Hz (100 samples ~ 871). */
+            static const char pcm_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "q=0 function _init() memset(0x4300,200,100)\n"
+                "n=serial(0x808,0x4300,100) q=stat(108) end\n"
+                "function _draw() cls() if n==100 and q==100 then pset(0,0,7) end\n"
+                "if stat(108)==0 then pset(1,0,7) end end\n";
+            p8p_cart_t pcm_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)pcm_source,
+                                            sizeof(pcm_source) - 1,
+                                            &pcm_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &pcm_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
+            audio_crossings(runtime, 1000);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            p8p_cart_destroy(&pcm_cart);
+        }
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)

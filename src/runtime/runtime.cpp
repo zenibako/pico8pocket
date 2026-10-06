@@ -2256,7 +2256,8 @@ static int api_stat(lua_State *lua) {
         lua_pushnil(lua);
         break;
     case 108:
-        push_int(lua, 32);
+        /* PCM samples still queued from serial(0x808). */
+        push_int(lua, p8p_audio_pcm_queued(runtime->audio));
         break;
     case 46: case 47: case 48: case 49:
         push_int(lua, p8p_audio_channel_sfx(runtime->audio, item - 46));
@@ -2282,9 +2283,22 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
+/* serial(channel, address, length).  Only 0x808, PICO-8's 8-bit 5512.5 Hz
+ * PCM output, is implemented; other channels consume nothing. */
 static int api_serial(lua_State *lua) {
-    (void)lua;
-    push_int(lua, 0);
+    p8p_runtime_t *runtime = active_runtime;
+    int channel = arg_int(lua, 1, 0);
+    int address = arg_int(lua, 2, 0);
+    int length = arg_int(lua, 3, 0);
+    int processed = 0;
+    if (channel == 0x808 && address >= 0 && length > 0 &&
+        address + length <= 0x10000) {
+        if (range_touches_screen(address, length))
+            screen_to_ram(runtime);
+        processed = p8p_audio_pcm_push(runtime->audio, runtime->ram + address,
+                                       length);
+    }
+    push_int(lua, processed);
     return 1;
 }
 

@@ -40,6 +40,11 @@ typedef struct p8p_audio_channel {
     uint32_t vibrato_phase;
 } p8p_audio_channel_t;
 
+/* PCM samples buffered from serial(0x808), about 0.74 s at 5512.5 Hz. */
+#define P8P_PCM_CAPACITY 4096u
+/* 5512.5 / 48000 as a 32-bit phase step. */
+#define P8P_PCM_STEP 493250560u
+
 /* PICO-8 reverb delays are 366 and 732 samples at 22050 Hz. */
 #define P8P_REVERB_SHORT 797
 #define P8P_REVERB_LONG 1594
@@ -84,6 +89,11 @@ struct p8p_audio {
     int32_t music_fade_step;
     /* Not serialized; see p8p_audio_extra_t. */
     p8p_audio_extra_t extra[P8P_AUDIO_CHANNELS];
+    /* PCM stream from serial(0x808); also not serialized. */
+    uint8_t pcm[P8P_PCM_CAPACITY];
+    uint32_t pcm_read;
+    uint32_t pcm_count;
+    uint32_t pcm_phase;
 };
 
 /* 440 * 2^((key - 33) / 12), converted to a 32-bit phase step at 48 kHz. */
@@ -570,6 +580,7 @@ static int32_t channel_effects(p8p_audio_t *audio, int index, int32_t value,
 
 static void reset_extra(p8p_audio_t *audio) {
     memset(audio->extra, 0, sizeof(audio->extra));
+    audio->pcm_read = audio->pcm_count = audio->pcm_phase = 0;
     for (int channel = 0; channel < P8P_AUDIO_CHANNELS; ++channel) {
         audio->extra[channel].instrument.sfx = -1;
         audio->extra[channel].seen_sfx = -1;
@@ -775,6 +786,16 @@ void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {
             mix += value;
             voice_step(audio, channel);
         }
+        if (audio->pcm_count) {
+            /* 8-bit unsigned PCM, held for each 5512.5 Hz sample period. */
+            mix += ((int32_t)audio->pcm[audio->pcm_read] - 128) * 64;
+            uint32_t next_phase = audio->pcm_phase + P8P_PCM_STEP;
+            if (next_phase < audio->pcm_phase) {
+                audio->pcm_read = (audio->pcm_read + 1) % P8P_PCM_CAPACITY;
+                --audio->pcm_count;
+            }
+            audio->pcm_phase = next_phase;
+        }
         if (mix > 32767) mix = 32767;
         if (mix < -32768) mix = -32768;
         stereo[frame * 2] = (int16_t)mix;
@@ -800,6 +821,22 @@ typedef struct p8p_audio_v032 {
 P8P_STATIC_ASSERT(offsetof(p8p_audio_t, extra) - offsetof(p8p_audio_t, channels) >=
                P8P_AUDIO_V032_STATE_SIZE,
                "saved audio state must not overlap the unsaved extra state");
+
+int p8p_audio_pcm_push(p8p_audio_t *audio, const uint8_t *samples, int count) {
+    int queued = 0;
+    if (!audio || !samples)
+        return 0;
+    while (queued < count && audio->pcm_count < P8P_PCM_CAPACITY) {
+        uint32_t slot = (audio->pcm_read + audio->pcm_count) % P8P_PCM_CAPACITY;
+        audio->pcm[slot] = samples[queued++];
+        ++audio->pcm_count;
+    }
+    return queued;
+}
+
+int p8p_audio_pcm_queued(const p8p_audio_t *audio) {
+    return audio ? (int)audio->pcm_count : 0;
+}
 
 size_t p8p_audio_state_size(void) {
     /* The channels and music state, exactly as 0.0.32 saved them. */
