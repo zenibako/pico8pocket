@@ -1,0 +1,42 @@
+Fast path for short decimal integers in luaO_str2d.
+
+PICO-8 carts call split() on strings of numbers every frame, and each
+field went through three strpbrk() scans and strtod().  Plain "[-]digits"
+strings up to 32767 are converted directly; everything else (fractions,
+hex, binary, whitespace, out-of-range values) keeps the original parser.
+
+diff --git a/lobject.c b/lobject.c
+--- a/lobject.c
++++ b/lobject.c
+@@ -208,8 +208,31 @@
+ }
+ 
+ 
++/*
++** Pico8Pocket: split() and string arguments convert many short decimal
++** integers per frame.  Parse "[-]digits" up to 32767 exactly here instead of
++** three strpbrk() scans and strtod(); anything else takes the original path.
++*/
++static int str2smallint (const char *s, size_t len, lua_Number *result) {
++  size_t i = 0;
++  int value = 0;
++  int negative = len > 0 && s[0] == '-';
++  if (negative) i = 1;
++  if (i >= len || len - i > 5) return 0;
++  for (; i < len; i++) {
++    if (s[i] < '0' || s[i] > '9') return 0;
++    value = value * 10 + (s[i] - '0');
++  }
++  if (value > 32767) return 0;
++  *result = cast_num(negative ? -value : value);
++  return 1;
++}
++
++
+ int luaO_str2d (const char *s, size_t len, lua_Number *result) {
+   char *endptr;
++  if (str2smallint(s, len, result))
++    return 1;
+   if (strpbrk(s, "nN"))  /* reject 'inf' and 'nan' */
+     return 0;
+   else if (strpbrk(s, "xX"))  /* hexa? */

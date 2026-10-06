@@ -7,6 +7,7 @@
 #include <lauxlib.h>
 #include <fix32.h>
 
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -121,6 +122,11 @@ struct p8p_runtime_fixed_state {
 static const uint8_t runtime_state_magic[8] = {
     'P', '8', 'P', 'S', 'T', 'A', 'T', 'E'
 };
+
+static_assert(offsetof(p8p_runtime, ram) % 4 == 0,
+              "screen packing uses word access to RAM");
+static_assert(offsetof(p8p_runtime, framebuffer) % 4 == 0,
+              "screen packing uses word access to the framebuffer");
 
 static p8p_runtime_t *active_runtime;
 
@@ -307,26 +313,41 @@ static int in_clip(const p8p_runtime_t *runtime, int x, int y) {
 static void screen_to_ram(p8p_runtime_t *runtime) {
     if (!runtime->screen_ram_dirty)
         return;
-    for (int y = 0; y < 128; ++y) {
-        const uint8_t *source = runtime->framebuffer + y * 128;
-        uint8_t *destination = runtime->ram + runtime->draw_target + y * 64;
-        for (int x = 0; x < 64; ++x)
-            destination[x] = (uint8_t)((source[x * 2] & 15) |
-                                      ((source[x * 2 + 1] & 15) << 4));
+    /* Eight pixels per pair of word loads, one word store.  Both buffers are
+     * 4-byte aligned (see the static_asserts); telling the compiler lets
+     * RV32 use real lw/sw instead of byte accesses. */
+    const uint8_t *source =
+        (const uint8_t *)__builtin_assume_aligned(runtime->framebuffer, 4);
+    uint8_t *destination = (uint8_t *)__builtin_assume_aligned(
+        runtime->ram + runtime->draw_target, 4);
+    for (int i = 0; i < 128 * 128; i += 8) {
+        uint32_t a, b;
+        memcpy(&a, source + i, 4);
+        memcpy(&b, source + i + 4, 4);
+        a &= 0x0f0f0f0fu;
+        b &= 0x0f0f0f0fu;
+        a |= a >> 4;
+        b |= b >> 4;
+        uint32_t packed = (a & 0xff) | ((a >> 16) & 0xff) << 8 |
+                          (b & 0xff) << 16 | ((b >> 16) & 0xff) << 24;
+        memcpy(destination + i / 2, &packed, 4);
     }
     runtime->screen_ram_dirty = 0;
 }
 
 static void ram_to_screen(p8p_runtime_t *runtime) {
-    for (int y = 0; y < 128; ++y) {
-        const uint8_t *source = runtime->ram + runtime->draw_target + y * 64;
-        uint16_t *destination =
-            (uint16_t *)(runtime->framebuffer + y * 128);
-        for (int x = 0; x < 64; ++x) {
-            uint8_t packed = source[x];
-            destination[x] = (uint16_t)((packed & 15) |
-                                       ((uint16_t)(packed >> 4) << 8));
-        }
+    /* Two packed bytes per halfword load, four pixels per word store. */
+    const uint8_t *source = (const uint8_t *)__builtin_assume_aligned(
+        runtime->ram + runtime->draw_target, 4);
+    uint8_t *destination =
+        (uint8_t *)__builtin_assume_aligned(runtime->framebuffer, 4);
+    for (int i = 0; i < 64 * 128; i += 2) {
+        uint16_t two;
+        memcpy(&two, source + i, 2);
+        uint32_t lo = two & 0xff, hi = two >> 8;
+        uint32_t pixels = (lo & 15) | (lo >> 4) << 8 |
+                          (hi & 15) << 16 | (hi >> 4) << 24;
+        memcpy(destination + i * 2, &pixels, 4);
     }
     runtime->screen_ram_dirty = 0;
 }
@@ -343,6 +364,32 @@ static int range_touches_screen(int address, int length) {
     if (end <= 0x10000)
         return address < stop && end > start;
     return (address < stop) || ((end - 0x10000) > start);
+}
+
+/*
+ * After RAM bytes overlapping the draw target were written, refresh only the
+ * framebuffer pixels they cover.  Writes need no prior screen_to_ram(): the
+ * framebuffer stays authoritative, the written bytes become consistent, and
+ * a pending dirty flag still covers the rest of the packed copy.
+ */
+static void ram_to_screen_range(p8p_runtime_t *runtime, int address,
+                                int length) {
+    int base = runtime->draw_target;
+    address &= 0xffff;
+    while (length > 0) {
+        int chunk = length < 0x10000 - address ? length : 0x10000 - address;
+        int start = address > base ? address : base;
+        int stop = address + chunk < base + 0x2000 ? address + chunk
+                                                   : base + 0x2000;
+        for (int i = start; i < stop; ++i) {
+            uint8_t packed = runtime->ram[i];
+            int offset = (i - base) * 2;
+            runtime->framebuffer[offset] = packed & 15;
+            runtime->framebuffer[offset + 1] = packed >> 4;
+        }
+        length -= chunk;
+        address = 0;
+    }
 }
 
 /* PICO-8 maps 0x5f55 = 0 to the sprite sheet, 0x80+ to upper memory and
@@ -1392,14 +1439,11 @@ static int api_poke(lua_State *lua) {
     int values = lua_gettop(lua) - 1;
     if (values < 1)
         values = 1;
-    int touches_screen = range_touches_screen(address, values);
-    if (touches_screen)
-        screen_to_ram(active_runtime);
     for (int i = 0; i < values; ++i)
         active_runtime->ram[(address + i) & 0xffff] =
             (uint8_t)arg_int(lua, i + 2, 0);
-    if (touches_screen)
-        ram_to_screen(active_runtime);
+    if (range_touches_screen(address, values))
+        ram_to_screen_range(active_runtime, address, values);
     if (range_touches_draw_state(address, values))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, values))
@@ -1427,11 +1471,10 @@ static int api_poke2(lua_State *lua) {
     int value = arg_int(lua, 2, 0);
     if (address < 0 || address > 0xfffe)
         return 0;
-    int touches_screen = range_touches_screen(address, 2);
-    if (touches_screen) screen_to_ram(active_runtime);
     active_runtime->ram[address] = (uint8_t)value;
     active_runtime->ram[address + 1] = (uint8_t)(value >> 8);
-    if (touches_screen) ram_to_screen(active_runtime);
+    if (range_touches_screen(address, 2))
+        ram_to_screen_range(active_runtime, address, 2);
     if (range_touches_draw_state(address, 2))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, 2)) cartdata_mark_dirty(active_runtime);
@@ -1461,13 +1504,12 @@ static int api_poke4(lua_State *lua) {
     if (address < 0 || address > 0xfffc)
         return 0;
     uint32_t bits = (uint32_t)arg_number(lua, 2, fix32(0)).bits();
-    int touches_screen = range_touches_screen(address, 4);
-    if (touches_screen) screen_to_ram(active_runtime);
     active_runtime->ram[address] = (uint8_t)bits;
     active_runtime->ram[address + 1] = (uint8_t)(bits >> 8);
     active_runtime->ram[address + 2] = (uint8_t)(bits >> 16);
     active_runtime->ram[address + 3] = (uint8_t)(bits >> 24);
-    if (touches_screen) ram_to_screen(active_runtime);
+    if (range_touches_screen(address, 4))
+        ram_to_screen_range(active_runtime, address, 4);
     if (range_touches_draw_state(address, 4))
         draw_state_from_ram(active_runtime);
     if (range_touches_cartdata(address, 4)) cartdata_mark_dirty(active_runtime);
@@ -1480,12 +1522,9 @@ static int api_memset(lua_State *lua) {
     int value = arg_int(lua, 2, 0);
     int length = arg_int(lua, 3, 0);
     if (destination >= 0 && length >= 0 && destination + length <= 0x10000) {
-        int touches_screen = range_touches_screen(destination, length);
-        if (touches_screen)
-            screen_to_ram(active_runtime);
         memset(active_runtime->ram + destination, value, (size_t)length);
-        if (touches_screen)
-            ram_to_screen(active_runtime);
+        if (range_touches_screen(destination, length))
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
         if (range_touches_cartdata(destination, length))
@@ -1503,12 +1542,12 @@ static int api_memcpy(lua_State *lua) {
         destination + length <= 0x10000 && source + length <= 0x10000) {
         int reads_screen = range_touches_screen(source, length);
         int writes_screen = range_touches_screen(destination, length);
-        if (reads_screen || writes_screen)
+        if (reads_screen)
             screen_to_ram(active_runtime);
         memmove(active_runtime->ram + destination, active_runtime->ram + source,
                 (size_t)length);
         if (writes_screen)
-            ram_to_screen(active_runtime);
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
         if (range_touches_cartdata(destination, length))
@@ -1526,12 +1565,10 @@ static int api_reload(lua_State *lua) {
         destination + length <= 0x10000 &&
         source + length <= (int)P8P_CART_ROM_SIZE) {
         int writes_screen = range_touches_screen(destination, length);
-        if (writes_screen)
-            screen_to_ram(active_runtime);
         memcpy(active_runtime->ram + destination, active_runtime->cart_rom + source,
                (size_t)length);
         if (writes_screen)
-            ram_to_screen(active_runtime);
+            ram_to_screen_range(active_runtime, destination, length);
         if (range_touches_draw_state(destination, length))
             draw_state_from_ram(active_runtime);
     }
@@ -1689,13 +1726,10 @@ static void write_ram_bytes(p8p_runtime_t *runtime, int address,
     address &= 0xffff;
     if (count <= 0)
         return;
-    int touches_screen = range_touches_screen(address, count);
-    if (touches_screen)
-        screen_to_ram(runtime);
     for (int i = 0; i < count; ++i)
         runtime->ram[(address + i) & 0xffff] = bytes[i];
-    if (touches_screen)
-        ram_to_screen(runtime);
+    if (range_touches_screen(address, count))
+        ram_to_screen_range(runtime, address, count);
     if (range_touches_draw_state(address, count))
         draw_state_from_ram(runtime);
     if (range_touches_cartdata(address, count))

@@ -58,6 +58,16 @@
   memory) and back, which carts such as Kiloman use to compose sprites.
 - `palt(bitfield)` sets transparency for all sixteen colours at once.
 
+- Writes into screen memory (`poke`, `memset`, `memcpy`, `reload`, print
+  pokes) update only the affected framebuffer pixels instead of packing and
+  unpacking the whole screen. Kiloman `memset`s its health bars about 26
+  times per frame, which previously cost over half a million pixel
+  conversions per frame.
+- Full-screen packing and unpacking use aligned word loads and stores.
+- `split()` and other number conversions parse plain decimal integers up to
+  32767 directly instead of through `strtod` (exactly equivalent; checked
+  against `strtod` for every integer string from -99999 to 99999).
+
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
 changes cut host instructions per gameplay frame by 26% with byte-identical
