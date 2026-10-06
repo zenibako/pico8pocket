@@ -84,6 +84,17 @@ Local hardware-test build.
   next frame instead of never.
 - `btnp()` honours the repeat delay and interval at `0x5f5c`/`0x5f5d`,
   including 255 to disable repeating, as Kiloman does.
+- Custom SFX instruments: notes with the custom bit play SFX 0-7 as an
+  instrument at its own speed, loops and effects, transposed relative to C-2
+  and scaled by the note volume, restarting as PICO-8 does. 31 of 65 carts in
+  one tested library use custom instruments or filters.
+- SFX filters: detune (second oscillator), buzz and noiz waveform variants,
+  reverb (two feedback delays) and dampen (high-shelf filters), plus the
+  hardware reverb/low-pass bits at `0x5f41`/`0x5f43`. Behaviour follows
+  zepto8/Fake-08. Carts that use neither feature render bit-identical audio
+  (checked on 34 carts); audio CPU in Kiloman roughly doubles on the host.
+- Saved states keep the 0.0.32 audio layout; instrument voices and filter
+  memory are not saved and restart on the next note.
 
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
@@ -104,9 +115,8 @@ contains it cannot be loaded directly.
 
 ### Known limitations
 
-- Custom SFX instruments and the noise/buzz/detune/reverb/dampen filters are
-  not implemented yet, so music that uses them (23 of Kiloman's 59 SFX) plays
-  plain waveforms instead.
+- PICO-8's distort and half-rate hardware audio bits (`0x5f42`, `0x5f40`)
+  and the click-removing crossfade between notes are not implemented.
 - The PICO-8 pause menu and `menuitem()` entries are not available.
 - Save-state persistence, `cartdata`, cartridge selection and menu input need
   a physical Pocket regression pass on the new API 0.9.0 runtime.

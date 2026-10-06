@@ -23,6 +23,58 @@ static void count_service_hook(void *) {
         p8p_runtime_set_live_buttons(service_hook_runtime, (uint8_t)inject_live);
 }
 
+static uint32_t last_audio_hash;
+
+/* Zero crossings of the left channel over the next `frames` samples; also
+ * records a hash of the samples in last_audio_hash. */
+static int audio_crossings(p8p_runtime_t *runtime, int frames) {
+    static int16_t buffer[9600 * 2];
+    int crossings = 0;
+    p8p_runtime_audio_render(runtime, buffer, (size_t)frames);
+    last_audio_hash = 2166136261u;
+    for (int i = 0; i < frames; ++i) {
+        last_audio_hash = (last_audio_hash ^ (uint16_t)buffer[i * 2]) * 16777619u;
+        if (i && (buffer[(i - 1) * 2] < 0) != (buffer[i * 2] < 0))
+            ++crossings;
+    }
+    return crossings;
+}
+
+static int audio_crossings_for(p8p_runtime_t *runtime, const char *init) {
+    /* SFX 0: square C-2 instrument, looping.  SFX 1: custom instrument 0 at
+     * C-3.  SFX 2: plain square C-3.  SFX 3: SFX 0 an octave up, used as
+     * instrument by SFX 4 at C-3.  SFX 5: SFX 2 with detune. */
+    static const char header[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n";
+    /* Each entry: 4-byte header (filters, speed, loop start/end) and the
+     * first note (key, waveform + custom bit, volume, effect). */
+    static const char *const sfx_lines[][2] = {
+        {"00100001", "18350"}, {"00100000", "24870"}, {"00100000", "24370"},
+        {"00100001", "24350"}, {"00100000", "24b70"}, {"08100000", "24370"},
+    };
+    char sfx[2048] = "__sfx__\n";
+    for (size_t i = 0; i < sizeof(sfx_lines) / sizeof(sfx_lines[0]); ++i) {
+        strcat(sfx, sfx_lines[i][0]);
+        strcat(sfx, sfx_lines[i][1]);
+        for (int note = 1; note < 32; ++note)
+            strcat(sfx, "00000");
+        strcat(sfx, "\n");
+    }
+    static char source[4096];
+    p8p_cart_t cart = {};
+    snprintf(source, sizeof(source), "%sfunction _init() %s end\n%s",
+             header, init, sfx);
+    if (p8p_cart_load_text_memory((const uint8_t *)source, strlen(source),
+                                  &cart) != 0)
+        return -1;
+    int result = -1;
+    if (p8p_runtime_load(runtime, &cart) == 0 &&
+        p8p_runtime_step(runtime, 0) == 0)
+        result = audio_crossings(runtime, 9600);
+    p8p_cart_destroy(&cart);
+    return result;
+}
+
 static void count_profile_event(void *, p8p_runtime_profile_event_t event) {
     if ((unsigned)event < 4)
         ++profile_event_calls[event];
@@ -516,6 +568,25 @@ int main(void) {
         for (int frame = 0; frame < 40; ++frame)
             CHECK(p8p_runtime_step(runtime, 1u << 4) == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+
+        {
+            int plain = audio_crossings_for(runtime, "sfx(2)");
+            uint32_t plain_hash = last_audio_hash;
+            int custom = audio_crossings_for(runtime, "sfx(1)");
+            int octave = audio_crossings_for(runtime, "sfx(4)");
+            int detuned = audio_crossings_for(runtime, "sfx(5)");
+            uint32_t detuned_hash = last_audio_hash;
+            fprintf(stderr, "audio crossings: plain=%d custom=%d octave=%d "
+                    "detuned=%d\n", plain, custom, octave, detuned);
+            /* One note at speed 16 lasts ~0.13 s; C-3 (~523 Hz) gives
+             * ~139 crossings.  The custom instrument plays C-2 transposed by
+             * the parent's C-3, so it matches; an instrument note an octave
+             * higher doubles it.  Detune must change the waveform. */
+            CHECK(plain > 125 && plain < 150);
+            CHECK(custom > plain - 4 && custom < plain + 4);
+            CHECK(octave > 2 * plain - 8 && octave < 2 * plain + 8);
+            CHECK(detuned > 0 && detuned_hash != plain_hash);
+        }
 
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
