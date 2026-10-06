@@ -565,6 +565,34 @@ int main(void) {
                                       &state_meta) == 0);
         CHECK(state_meta.exists == 0);
 
+        {
+            /* A state whose raw size exceeds the 256 KiB slot (Moss Moss
+             * saves ~500 KB) must still save when it compresses to fit. */
+            static const char big_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "big={} for i=1,12000 do big[i]=\"item \"..i end\n"
+                "function _draw() cls() if #big==12000 and big[777]==\"item 777\" then pset(0,0,7) end end\n";
+            p8p_cart_t big_cart = {};
+            p8p_cart_hash_t big_hash = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)big_source,
+                                            sizeof(big_source) - 1,
+                                            &big_cart) == 0);
+            p8p_cart_content_hash(&big_cart, &big_hash);
+            CHECK(p8p_runtime_load(runtime, &big_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_state_save_file(store_path, &big_hash, runtime) == 0);
+            CHECK(p8p_state_get_meta_file(store_path, &big_hash,
+                                          &state_meta) == 0);
+            CHECK(state_meta.exists == 1);
+            CHECK(state_meta.raw_size > 256u * 1024u);
+            CHECK(p8p_runtime_load(runtime, &big_cart) == 0);
+            CHECK(p8p_state_load_file(store_path, &big_hash, runtime) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+            CHECK(p8p_state_delete_file(store_path, &big_hash) == 0);
+            p8p_cart_destroy(&big_cart);
+        }
+
         loaded = p8p_runtime_load(runtime, &flip_cart);
         CHECK(loaded == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[1 * 128 + 1] == 8);

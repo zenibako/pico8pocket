@@ -31,6 +31,10 @@
 - `==` and `~=` compare numbers, nil, booleans and strings inside the
   interpreter loop instead of calling out; only tables and userdata, which
   may have `__eq`, still take the call (2-3% of Moss Moss's frame).
+- Save states with a large Lua heap save again. The store reserved the
+  compressor's worst case for the raw size, so any state over ~256 KB raw
+  was refused even though it compresses far smaller: Moss Moss's ~500 KB
+  state takes 84 KB.
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.
