@@ -324,6 +324,8 @@ int main(void) {
         "cstore() if trace(\"here\")==\"here\" and trace()==\"\" then pset(13,2,7) end\n"
         "if tostr(1.5)..\",\"..-32768 ..\",\"..(1/3)..\",\"..0x0.0001 ..\",\"..-0x0.0001 ..\",\"..32767.99999 ..\",\"..-2.25 ==\"1.5,-32768,0.3333,0,-0,32768,-2.25\" then pset(15,2,7) end\n"
         "local n=0 for v in all(split(false,\",\")) do n+=1 end if n==0 and split(nil)==nil and #split(\"1,2\")==2 and split(12)[1]==12 then pset(16,2,7) end\n"
+        "local m={__eq=function() return true end} local ta,tb=setmetatable({},m),setmetatable({},m) local sa=\"ab\" local sb=\"a\"..\"b\"\n"
+        "if 1==1.0 and 2~=3 and sa==sb and sa~=\"ac\" and nil~=false and false==false and true~=false and ta==tb and {}~={} and ta==ta then pset(17,2,7) end\n"
         "lc=5 do local lc*=2 local ls=\"a\" local ls..=\"b\" if lc==10 and ls==\"ab\" then pset(14,2,7) end end\n"
         "if lc~=5 then pset(14,2,0) end\n"
         "end\n";
@@ -557,7 +559,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 16; ++check) {
+        for (int check = 1; check <= 17; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);

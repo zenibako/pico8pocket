@@ -28,6 +28,9 @@
 - `split()` of a non-string (`nil`, `false`) returns nothing instead of
   raising an error, as in PICO-8. Turning Moss Moss's colorblind mode back
   off stopped the cart with "bad argument #1 to 'split'".
+- `==` and `~=` compare numbers, nil, booleans and strings inside the
+  interpreter loop instead of calling out; only tables and userdata, which
+  may have `__eq`, still take the call (2-3% of Moss Moss's frame).
 - The `all()` iterator reads the table directly and computes `#t` only at
   empty slots instead of on every step. Moss Moss, which iterates with
   `all()` throughout, needs about 26% fewer host instructions per frame.

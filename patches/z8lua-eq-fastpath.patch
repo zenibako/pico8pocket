@@ -1,0 +1,42 @@
+Compare numbers, nil, booleans and short strings inline in OP_EQ.
+
+Every == called luaV_equalobj_ (an out-of-line switch), ~4% of the frame
+in Moss Moss.  Only tables and userdata, which may have an __eq
+metamethod, still take the call.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -829,12 +829,26 @@
+       vmcase(OP_EQ,
+         TValue *rb = RKB(i);
+         TValue *rc = RKC(i);
+-        Protect(
+-          if (cast_int(equalobj(L, rb, rc)) != GETARG_A(i))
+-            ci->u.l.savedpc++;
+-          else
+-            donextjump(ci);
+-        )
++        int eq;
++        /* Numbers, nil, booleans and (interned) short strings compare
++           inline; tables and userdata may have __eq and use the call. */
++        if (!ttisequal(rb, rc))
++          eq = 0;
++        else if (ttisnumber(rb))
++          eq = luai_numeq(nvalue(rb), nvalue(rc));
++        else if (ttisshrstring(rb))
++          eq = rawtsvalue(rb) == rawtsvalue(rc);
++        else if (ttisnil(rb))
++          eq = 1;
++        else if (ttisboolean(rb))
++          eq = bvalue(rb) == bvalue(rc);
++        else {
++          Protect(eq = luaV_equalobj_(L, rb, rc));
++        }
++        if (eq != GETARG_A(i))
++          ci->u.l.savedpc++;
++        else
++          donextjump(ci);
+       )
+       vmcase(OP_LT,
+         Protect(

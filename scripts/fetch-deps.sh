@@ -29,6 +29,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-local-compound.patch"
     "$PROJECT_ROOT/patches/z8lua-number-format.patch"
     "$PROJECT_ROOT/patches/z8lua-split-nonstring.patch"
+    "$PROJECT_ROOT/patches/z8lua-eq-fastpath.patch"
 )
 
 fetch_one() {
