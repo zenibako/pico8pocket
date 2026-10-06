@@ -56,7 +56,7 @@
   long frames) only at jumps, loop back-edges and calls instead of before
   every instruction, with the hook period cut from 8192 to 2048 so service
   happens as often as before. Celeste 2 needs 12.7% fewer host instructions
-  per frame than the baseline recorded before the interpreter work. Carts that
+  per frame than when the Celeste check was added. Carts that
   split a long `_init` across frames may now reach their first frame a
   frame or so earlier or later.
 - The `all()` iterator reads the table directly and computes `#t` only at
