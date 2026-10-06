@@ -347,8 +347,11 @@ static int lua_pool_panic(lua_State *lua) {
     return 0;
 }
 
-static void push_int(lua_State *lua, int32_t value) {
-    lua_pushnumber(lua, fix32(value));
+/* What lua_pushnumber does for a fix32, without the call.  C functions
+ * have LUA_MINSTACK free slots; larger pushes reserve them first. */
+static inline void push_int(lua_State *lua, int32_t value) {
+    setnvalue(lua->top, fix32(value));
+    ++lua->top;
 }
 
 static int in_clip(const p8p_runtime_t *runtime, int x, int y) {
@@ -1172,13 +1175,14 @@ static int api_mset(lua_State *lua) {
 
 static int api_fget(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int sprite = (int32_t)lua_tonumber(lua, 1) & 255;
+    int sprite = arg_int(lua, 1, 0) & 255;
     uint8_t flags = active_runtime->ram[0x3000 + sprite];
     if (arg_count(lua) < 2) {
         push_int(lua, flags);
     } else {
-        int flag = (int32_t)lua_tonumber(lua, 2) & 7;
-        lua_pushboolean(lua, (flags & (1u << flag)) != 0);
+        int flag = arg_int(lua, 2, 0) & 7;
+        setbvalue(lua->top, (flags & (1u << flag)) != 0);
+        ++lua->top;
     }
     return 1;
 }
@@ -1502,7 +1506,7 @@ static int api_peek(lua_State *lua) {
     /* PICO-8 v0.2.5+ raised the multi-value peek limit from 8192. */
     if (count > 32767) count = 32767;
     /* C functions are only guaranteed LUA_MINSTACK free slots. */
-    if (!lua_checkstack(lua, count))
+    if (count > LUA_MINSTACK && !lua_checkstack(lua, count))
         return luaL_error(lua, "peek: stack overflow");
     if (range_touches_screen(address, count))
         screen_to_ram(active_runtime);
