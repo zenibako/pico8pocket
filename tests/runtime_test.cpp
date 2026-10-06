@@ -99,6 +99,7 @@ int main(void) {
     p8p_cart_t env_fallback_cart = {};
     p8p_cart_t memory_limits_cart = {};
     p8p_cart_t table_paths_cart = {};
+    p8p_cart_t text_engine_cart = {};
     p8p_runtime_t *runtime;
     const uint8_t *framebuffer;
     const uint8_t *screen_palette;
@@ -230,6 +231,25 @@ int main(void) {
     CHECK(p8p_cart_load_text_memory(table_paths_source,
                                     sizeof(table_paths_source) - 1,
                                     &table_paths_cart) == 0);
+    /* .p8 source stores P8SCII as UTF-8 glyphs: U+25DD is 255 and the
+     * down-arrow emoji (with or without U+FE0F) is 131. */
+    static const uint8_t text_engine_source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _draw() cls()\n"
+        "local s=\"\xe2\x97\x9d" "\xe2\xac\x87\xef\xb8\x8f" "\xe2\xac\x87\"\n"
+        "if #s==3 and ord(s,1)==255 and ord(s,2)==131 and ord(s,3)==131 then pset(1,2,7) end\n"
+        "palt(2) if peek(0x5f0e)&16>0 and peek(0x5f00)&16==0 then pset(2,2,7) end palt()\n"
+        "if print(\"ab\",10,100)==18 then pset(3,2,7) end\n"
+        "print(\"\\fcx\",30,100,7) local hit=0\n"
+        "for y=100,104 do for x=30,33 do if pget(x,y)==12 then hit+=1 end end end\n"
+        "if hit>0 then pset(4,2,7) end\n"
+        "print(\"\\6!4300AB\") if peek(0x4300)==65 and peek(0x4301)==66 then pset(5,2,7) end\n"
+        "poke(0x5f55,0) pset(1,1,9) poke(0x5f55,0x60)\n"
+        "if sget(1,1)==9 and pget(1,1)==0 then pset(6,2,7) end\n"
+        "end\n";
+    CHECK(p8p_cart_load_text_memory(text_engine_source,
+                                    sizeof(text_engine_source) - 1,
+                                    &text_engine_cart) == 0);
     runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
     if (runtime) {
@@ -427,6 +447,17 @@ int main(void) {
         CHECK(p8p_runtime_step(runtime, 0) == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[128 + 8] == 7);
 
+        loaded = p8p_runtime_load(runtime, &text_engine_cart);
+        if (loaded != 0)
+            fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
+        CHECK(loaded == 0);
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        for (int check = 1; check <= 6; ++check) {
+            if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
+                fprintf(stderr, "text engine check %d failed\n", check);
+            CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);
+        }
+
         if (have_celeste) {
             loaded = p8p_runtime_load(runtime, &celeste_cart);
             if (loaded != 0)
@@ -489,6 +520,7 @@ int main(void) {
     p8p_cart_destroy(&env_fallback_cart);
     p8p_cart_destroy(&memory_limits_cart);
     p8p_cart_destroy(&table_paths_cart);
+    p8p_cart_destroy(&text_engine_cart);
     if (store_fd >= 0)
         unlink(store_path);
 

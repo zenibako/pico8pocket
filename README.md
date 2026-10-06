@@ -70,6 +70,10 @@ started and how you can help improve it.
   below its target frame rate. Raw P8SCII and UTF-8 button-glyph constants are
   registered as the six standard buttons, matching compact PNG carts that use
   `btn(⬅️)`, `btn(🅾️)` or `btn(❎)` instead of numeric button indices.
+- `.p8` text carts have their UTF-8 glyphs converted back to P8SCII bytes on
+  load, and `print()` implements PICO-8's text engine: the full default font,
+  custom fonts and P8SCII control codes, including memory pokes. Drawing can
+  be redirected to the sprite sheet through `0x5f55`.
 - Nested PICO-8 shorthand statements now share their terminating source
   newline correctly. This fixes minified cartridges such as Moss Moss where a
   nested one-line `if` previously swallowed the following movement code into

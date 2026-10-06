@@ -44,6 +44,20 @@
 - `make deps` records the applied z8lua patch set and reapplies all patches
   from a clean tree when it changes, instead of checking each patch alone.
 
+- `.p8` text carts now load like PICO-8 itself: UTF-8 glyphs in the Lua
+  source (control codes, button symbols, characters 128-255) are converted
+  back to single P8SCII bytes. Kiloman previously crashed decoding its data
+  strings because they kept their multi-byte UTF-8 form.
+- `print()` is a port of Fake-08's PICO-8 text engine: the complete
+  256-glyph default font (including the smaller uppercase letters and
+  button/kana glyphs), custom fonts at `0x5600`, and P8SCII control codes
+  such as `\f` colour, `\#` background, cursor moves, wide/tall/inverted
+  modes, one-off glyphs and `\^!`/`\^@` memory pokes. `print(str, col)`
+  sets the colour and `print()` returns the right-most x position.
+- Drawing can be redirected with `0x5f55` (to the sprite sheet or upper
+  memory) and back, which carts such as Kiloman use to compose sprites.
+- `palt(bitfield)` sets transparency for all sixteen colours at once.
+
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
 changes cut host instructions per gameplay frame by 26% with byte-identical
