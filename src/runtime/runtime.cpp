@@ -76,6 +76,11 @@ struct p8p_runtime {
     uint8_t cart_thread_active;
     uint8_t cart_thread_kind;
     uint8_t restart_requested;
+    /* menuitem() entries 1-5: label ("" when empty), button filter from
+     * bits 8-15 of the index, and a registry table of callbacks. */
+    char menu_labels[5][17];
+    uint8_t menu_filters[5];
+    int menu_ref;
     p8p_runtime_service_fn service_hook;
     void *service_userdata;
     p8p_runtime_profile_fn profile_hook;
@@ -2306,6 +2311,49 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
+/* menuitem(index, [label, [callback]]) adds, replaces or (without a label)
+ * removes pause-menu entry 1-5.  Bits 8-15 of index filter which button
+ * presses reach the callback. */
+static int api_menuitem(lua_State *lua) {
+    p8p_runtime_t *runtime = active_runtime;
+    int index = arg_int(lua, 1, 0);
+    int slot = (index & 0xff) - 1;
+    if (slot < 0 || slot >= 5)
+        return 0;
+    if (runtime->menu_ref == LUA_NOREF) {
+        lua_newtable(lua);
+        runtime->menu_ref = luaL_ref(lua, LUA_REGISTRYINDEX);
+    }
+    lua_rawgeti(lua, LUA_REGISTRYINDEX, runtime->menu_ref);
+    if (lua_isstring(lua, 2)) {
+        /* The system menu font is ASCII: button glyphs become letters and
+         * arrows, other P8SCII characters '?'. */
+        size_t length;
+        const unsigned char *label =
+            (const unsigned char *)lua_tolstring(lua, 2, &length);
+        size_t used = 0;
+        for (size_t i = 0; i < length && used < 16; ++i) {
+            unsigned char c = label[i];
+            char out = (c >= 32 && c < 127) ? (char)c :
+                       c == 0x8b ? '<' : c == 0x91 ? '>' : c == 0x94 ? '^' :
+                       c == 0x83 ? 'v' : c == 0x8e ? 'O' : c == 0x97 ? 'X' : '?';
+            runtime->menu_labels[slot][used++] = out;
+        }
+        runtime->menu_labels[slot][used] = '\0';
+        runtime->menu_filters[slot] = (uint8_t)((index >> 8) & 0xff);
+        if (lua_isfunction(lua, 3))
+            lua_pushvalue(lua, 3);
+        else
+            lua_pushnil(lua);
+    } else {
+        runtime->menu_labels[slot][0] = '\0';
+        lua_pushnil(lua);
+    }
+    lua_rawseti(lua, -2, slot + 1);
+    lua_pop(lua, 1);
+    return 0;
+}
+
 /* trace([message]) returns a stack trace in PICO-8; the Lua debug library
  * is hidden here, so only the message comes back. */
 static int api_trace(lua_State *lua) {
@@ -2439,7 +2487,7 @@ static const luaL_Reg runtime_api[] = {
     {"srand", api_srand}, {"time", api_time}, {"t", api_time},
     {"flip", api_flip},
     {"cursor", api_cursor}, {"print", api_print}, {"sfx", api_sfx},
-    {"music", api_music}, {"fillp", api_fillp}, {"menuitem", api_stub},
+    {"music", api_music}, {"fillp", api_fillp}, 
     {"printh", api_stub}, {"extcmd", api_stub}, {"serial", api_serial},
     {"mkdir", api_cooperative_stub}, {"cd", api_stub},
     {"stat", api_stat}, {"run", api_run}, {"all", api_all},
@@ -2448,9 +2496,11 @@ static const luaL_Reg runtime_api[] = {
 
 /* Added after 0.0.33's first save-state format: numbered last by
  * eris.__p8p_init so existing permanent-object IDs do not move. Keep in
- * sync with the list in that function. */
+ * sync with the list in that function.  menuitem used to share api_stub,
+ * which was numbered under "cd", so moving it here keeps the IDs too. */
 static const luaL_Reg late_runtime_api[] = {
-    {"cstore", api_stub}, {"trace", api_trace}, {NULL, NULL}
+    {"cstore", api_stub}, {"trace", api_trace}, {"menuitem", api_menuitem},
+    {NULL, NULL}
 };
 
 static void register_pico8_button_constants(lua_State *lua) {
@@ -2503,7 +2553,7 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local late={'cstore','trace'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local late={'cstore','trace','menuitem'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
     " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"
@@ -2695,6 +2745,9 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->cart_thread = NULL;
     runtime->cart_thread_ref = LUA_NOREF;
     runtime->cart_thread_active = 0;
+    memset(runtime->menu_labels, 0, sizeof(runtime->menu_labels));
+    memset(runtime->menu_filters, 0, sizeof(runtime->menu_filters));
+    runtime->menu_ref = LUA_NOREF;
     memset(runtime->ram, 0, sizeof(runtime->ram));
     memcpy(runtime->cart_rom, cart->rom, sizeof(runtime->cart_rom));
     memcpy(runtime->ram, cart->rom, sizeof(runtime->cart_rom));
@@ -3119,6 +3172,43 @@ extern "C" const uint8_t *p8p_runtime_screen_palette(p8p_runtime_t *runtime) {
 extern "C" void p8p_runtime_audio_render(p8p_runtime_t *runtime,
                                           int16_t *stereo, size_t frames) {
     p8p_audio_render(runtime ? runtime->audio : NULL, stereo, frames);
+}
+
+extern "C" const char *p8p_runtime_menu_item(const p8p_runtime_t *runtime,
+                                              int slot) {
+    if (!runtime || slot < 1 || slot > 5 || !runtime->menu_labels[slot - 1][0])
+        return NULL;
+    return runtime->menu_labels[slot - 1];
+}
+
+extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
+                                        int buttons) {
+    /* O/X select (PICO-8 passes 16|32|64 for them) and close the menu unless
+     * the callback returns true; left/right only notify the callback. */
+    int choose = (buttons & 0x70) != 0;
+    int filter;
+    int keep_open;
+    if (!p8p_runtime_menu_item(runtime, slot) || runtime->menu_ref == LUA_NOREF)
+        return choose ? 0 : 1;
+    filter = runtime->menu_filters[slot - 1];
+    if (filter && !(filter & buttons))
+        return choose ? 0 : 1;
+    active_runtime = runtime;
+    lua_rawgeti(runtime->lua, LUA_REGISTRYINDEX, runtime->menu_ref);
+    lua_rawgeti(runtime->lua, -1, slot);
+    lua_remove(runtime->lua, -2);
+    if (!lua_isfunction(runtime->lua, -1)) {
+        lua_pop(runtime->lua, 1);
+        return choose ? 0 : 1;
+    }
+    push_int(runtime->lua, buttons);
+    if (lua_pcall(runtime->lua, 1, 1, 0) != LUA_OK) {
+        set_error(runtime, "menu item");
+        return -1;
+    }
+    keep_open = !choose || lua_toboolean(runtime->lua, -1);
+    lua_pop(runtime->lua, 1);
+    return keep_open;
 }
 
 extern "C" int p8p_runtime_target_fps(const p8p_runtime_t *runtime) {

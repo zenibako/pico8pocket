@@ -152,7 +152,8 @@ would require a new Pocket firmware API from Analogue.
    settings and native AnalogueOS cartridge reload.
 6. **Implemented in alpha:** cooperative `flip`, extended drawing/memory APIs,
    draw-state aliases, remappable big maps and persistent `cartdata`.
-7. **Next:** custom instruments/audio filters, PICO pause menu, multicart
-   `load`, and physical-Pocket timing/scaler validation.
+7. **Implemented:** custom SFX instruments and filters; cartridge
+   `menuitem()` entries in the system menu.
+   **Next:** multicart `load` and physical-Pocket timing/scaler validation.
 8. Browser/indexer, ZIP, cart previews, favorites and recent entries.
 9. PICO-8 v0.2.7 conformance matrix.

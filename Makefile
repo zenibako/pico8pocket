@@ -27,14 +27,14 @@ $(TEST_BIN): tests/test_main.c src/app/system_input.c src/app/scheduler.c src/ru
 		tests/test_main.c src/app/system_input.c src/app/scheduler.c src/runtime/cart.c src/runtime/cart_png.c \
 		src/runtime/display.c $(MINIZ_ROOT)/miniz.c -o $@
 
-$(RUNTIME_TEST_BIN): tests/runtime_test.cpp src/runtime/runtime.cpp src/runtime/audio.c src/runtime/cart.c src/app/state_store.c src/app/settings.c \
+$(RUNTIME_TEST_BIN): tests/runtime_test.cpp src/runtime/runtime.cpp src/runtime/audio.c src/runtime/cart.c src/app/state_store.c src/app/settings.c src/app/menu.c \
 		src/runtime/cart_png.c include/p8p/runtime.h include/p8p/cart.h \
 		$(Z8LUA_SOURCES) $(MINIZ_ROOT)/miniz.c
 	@mkdir -p $(dir $@)
 	$(CXX) -x c++ -std=c++17 -O2 -fwrapv -Wall -Wextra \
 		-Wno-deprecated-declarations -Wno-unused-function -Wno-unused-parameter \
 		-Iinclude -I$(Z8LUA_ROOT) -I$(MINIZ_ROOT) \
-		tests/runtime_test.cpp src/runtime/runtime.cpp src/runtime/audio.c src/runtime/cart.c src/app/state_store.c src/app/settings.c \
+		tests/runtime_test.cpp src/runtime/runtime.cpp src/runtime/audio.c src/runtime/cart.c src/app/state_store.c src/app/settings.c src/app/menu.c \
 		src/runtime/cart_png.c $(Z8LUA_SOURCES) $(MINIZ_ROOT)/miniz.c -lm -o $@
 
 $(COMPAT_SCAN_BIN): tools/compat_scan.cpp src/runtime/runtime.cpp src/runtime/audio.c src/runtime/cart.c \

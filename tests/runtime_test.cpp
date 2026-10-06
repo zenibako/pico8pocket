@@ -1,4 +1,6 @@
 #include "p8p/cart.h"
+#include "p8p/menu.h"
+#include "p8p/platform.h"
 #include "p8p/runtime.h"
 #include "p8p/state_store.h"
 #include "miniz.h"
@@ -7,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Platform hooks used by the system menu. */
+void p8p_platform_audio_set_volume(unsigned) {}
+unsigned p8p_platform_set_scale(unsigned scale) { return scale; }
+uint8_t p8p_platform_dim_color(uint8_t color) { return color; }
 
 static int failures;
 static int service_hook_calls;
@@ -676,6 +683,80 @@ int main(void) {
             CHECK(p8p_runtime_framebuffer(runtime)[5 * 128 + 5] != 8);
             free(state);
             p8p_cart_destroy(&flip_state_cart);
+        }
+
+        {
+            /* menuitem(): slots 1-5, removal, the button filter in bits 8-15,
+             * O/X closing unless the callback returns true, and errors. */
+            static const char menu_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "s=0 last=-1\n"
+                "function _init()\n"
+                "menuitem(1,\"Music: on\",function(b) last=b if b&3>0 then s+=1 return true end end)\n"
+                "menuitem(2,\"gone\") menuitem(2)\n"
+                "menuitem(3|0x100,\"left \x8e/\x97\",function(b) last=b end)\n"
+                "menuitem(4,\"err\",function() error(\"boom\") end)\n"
+                "menuitem(9,\"bad\")\n"
+                "end\n"
+                "function _draw() cls() pset(0,0,s) if last==112 then pset(1,0,7) end end\n";
+            p8p_cart_t menu_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)menu_source,
+                                            sizeof(menu_source) - 1,
+                                            &menu_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &menu_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            const char *label = p8p_runtime_menu_item(runtime, 1);
+            CHECK(label && strcmp(label, "Music: on") == 0);
+            CHECK(p8p_runtime_menu_item(runtime, 2) == NULL);
+            label = p8p_runtime_menu_item(runtime, 3);
+            CHECK(label && strcmp(label, "left O/X") == 0);
+            CHECK(p8p_runtime_menu_item(runtime, 0) == NULL);
+            CHECK(p8p_runtime_menu_item(runtime, 6) == NULL);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 2) == 1);
+            CHECK(p8p_runtime_menu_select(runtime, 3, 2) == 1);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 112) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 1);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            CHECK(p8p_runtime_menu_select(runtime, 4, 112) == -1);
+            CHECK(strstr(p8p_runtime_error(runtime), "boom") != NULL);
+
+            /* The system menu lists cart entries after RESUME: right on
+             * entry 1 keeps the menu open, A on it closes the menu. */
+            CHECK(p8p_runtime_load(runtime, &menu_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            /* The menu reads state slots ("save:N") from the working
+             * directory; keep them out of the source tree. */
+            char menu_dir[] = "/tmp/pico8pocket-menu-XXXXXX";
+            char previous_dir[1024];
+            CHECK(getcwd(previous_dir, sizeof(previous_dir)) != NULL);
+            CHECK(mkdtemp(menu_dir) != NULL && chdir(menu_dir) == 0);
+            p8p_settings_t menu_settings;
+            p8p_cart_hash_t menu_hash = {};
+            p8p_settings_defaults(&menu_settings);
+            p8p_menu_t *menu = p8p_menu_create(&menu_settings, &menu_hash, "P8");
+            CHECK(menu != NULL);
+            p8p_menu_open(menu, runtime, 0, 1);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN) == P8P_MENU_NONE);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_RIGHT) == P8P_MENU_NONE);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_CLOSE);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 1);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            /* Entry 4 raises an error: two rows below entry 1. */
+            p8p_menu_open(menu, runtime, 0, 1);
+            for (int i = 0; i < 3; ++i)
+                p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_CART_ERROR);
+            /* After a runtime error the cart entries are hidden. */
+            p8p_menu_open(menu, runtime, 0, 0);
+            p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_NONE);
+            p8p_menu_destroy(menu);
+            p8p_cart_destroy(&menu_cart);
+            unlink("save:0");
+            CHECK(chdir(previous_dir) == 0);
+            rmdir(menu_dir);
         }
 
         if (have_celeste) {

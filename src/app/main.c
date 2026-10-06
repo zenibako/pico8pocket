@@ -448,7 +448,7 @@ int main(int argc, char **argv) {
             menu_open = 1;
             menu_opened_this_frame = 1;
             p8p_platform_audio_set_paused(1);
-            p8p_menu_open(menu, runtime, physical);
+            p8p_menu_open(menu, runtime, physical, running);
         }
 
         const p8p_control_profile_t *controls =
@@ -505,6 +505,16 @@ int main(int argc, char **argv) {
                 p8p_platform_audio_set_paused(0);
             } else if (action == P8P_MENU_EXIT) {
                 p8p_platform_exit();
+            } else if (action == P8P_MENU_CART_ERROR) {
+                printf("pico8pocket: runtime error: %s\n",
+                       p8p_runtime_error(runtime));
+                running = 0;
+                runtime_failed = 1;
+                snprintf(runtime_error, sizeof(runtime_error), "%s",
+                         p8p_runtime_error(runtime));
+                menu_open = 0;
+                suppress_buttons = physical;
+                p8p_platform_audio_set_paused(0);
             }
         } else if (menu_open && (running || runtime_failed)) {
             present_framebuffer = p8p_menu_framebuffer(menu);

@@ -20,6 +20,18 @@ enum menu_screen {
     SCREEN_MODAL
 };
 
+/* Main-screen rows.  Cart rows (menuitem() slots 1-5) follow RESUME and
+ * only appear when the cart has added them. */
+enum main_row {
+    ROW_RESUME,
+    ROW_CART1, ROW_CART2, ROW_CART3, ROW_CART4, ROW_CART5,
+    ROW_QUICK_SAVE, ROW_QUICK_LOAD, ROW_STATES, ROW_RESTART, ROW_SELECT_CART,
+    ROW_CONTROLS, ROW_DISPLAY, ROW_AUDIO, ROW_LANGUAGE, ROW_INFO, ROW_EXIT,
+    ROW_COUNT
+};
+
+#define MAIN_VISIBLE_ROWS 12
+
 enum modal_kind {
     MODAL_NONE,
     MODAL_RESTART,
@@ -30,6 +42,8 @@ enum modal_kind {
 
 struct p8p_menu {
     p8p_settings_t *settings;
+    p8p_runtime_t *runtime;
+    int cart_running;
     p8p_cart_hash_t cart_hash;
     char cart_kind[16];
     uint8_t framebuffer[MENU_WIDTH * MENU_HEIGHT];
@@ -38,6 +52,7 @@ struct p8p_menu {
     uint16_t previous_buttons;
     int screen;
     int cursor;
+    int scroll;
     int modal;
     int modal_slot;
     int capture_action;
@@ -100,6 +115,16 @@ static uint16_t glyph_ascii(uint32_t character) {
     case '>': return GLYPH(4, 2, 1, 2, 4);
     case '=': return GLYPH(0, 7, 0, 7, 0);
     case '_': return GLYPH(0, 0, 0, 0, 7);
+    case '(': return GLYPH(1, 2, 2, 2, 1);
+    case ')': return GLYPH(4, 2, 2, 2, 4);
+    case '[': return GLYPH(3, 2, 2, 2, 3);
+    case ']': return GLYPH(6, 2, 2, 2, 6);
+    case '\'': return GLYPH(2, 2, 0, 0, 0);
+    case '"': return GLYPH(5, 5, 0, 0, 0);
+    case '*': return GLYPH(0, 5, 2, 5, 0);
+    case '%': return GLYPH(5, 1, 2, 4, 5);
+    case '#': return GLYPH(5, 7, 5, 7, 5);
+    case '^': return GLYPH(2, 5, 0, 0, 0);
     default: return 0;
     }
 #undef GLYPH
@@ -235,22 +260,71 @@ static void refresh_states(p8p_menu_t *menu) {
         refresh_state(menu, slot);
 }
 
-static void draw_main(p8p_menu_t *menu) {
+static int main_rows(const p8p_menu_t *menu, int rows[ROW_COUNT]) {
+    int count = 0;
+    rows[count++] = ROW_RESUME;
+    for (int slot = 1; slot <= 5; ++slot)
+        if (menu->cart_running && p8p_runtime_menu_item(menu->runtime, slot))
+            rows[count++] = ROW_CART1 + slot - 1;
+    for (int row = ROW_QUICK_SAVE; row < ROW_COUNT; ++row)
+        rows[count++] = row;
+    return count;
+}
+
+static int main_index(const p8p_menu_t *menu, int row) {
+    int rows[ROW_COUNT];
+    int count = main_rows(menu, rows);
+    for (int i = 0; i < count; ++i)
+        if (rows[i] == row)
+            return i;
+    return 0;
+}
+
+static const char *main_label(const p8p_menu_t *menu, int row) {
     static const char *en[] = {
-        "RESUME", "QUICK SAVE", "QUICK LOAD", "STATES", "RESTART CART",
+        "QUICK SAVE", "QUICK LOAD", "STATES", "RESTART CART",
         "SELECT CART", "CONTROLS", "DISPLAY", "AUDIO", "LANGUAGE",
         "CART INFO", "EXIT"
     };
     static const char *ru[] = {
-        "ПРОДОЛЖИТЬ", "БЫСТ.СОХР", "БЫСТ.ЗАГР", "СОСТОЯНИЯ",
-        "ПЕРЕЗАПУСК", "ВЫБРАТЬ ИГРУ", "УПРАВЛЕНИЕ", "ЭКРАН", "ЗВУК",
-        "ЯЗЫК", "ОБ ИГРЕ", "ВЫХОД"
+        "БЫСТ.СОХР", "БЫСТ.ЗАГР", "СОСТОЯНИЯ", "ПЕРЕЗАПУСК",
+        "ВЫБРАТЬ ИГРУ", "УПРАВЛЕНИЕ", "ЭКРАН", "ЗВУК", "ЯЗЫК", "ОБ ИГРЕ",
+        "ВЫХОД"
     };
+    if (row == ROW_RESUME)
+        return tr(menu, "RESUME", "ПРОДОЛЖИТЬ");
+    if (row >= ROW_CART1 && row <= ROW_CART5)
+        return p8p_runtime_menu_item(menu->runtime, row - ROW_CART1 + 1);
+    return menu->settings->language ? ru[row - ROW_QUICK_SAVE] :
+                                      en[row - ROW_QUICK_SAVE];
+}
+
+static void draw_main(p8p_menu_t *menu) {
+    int rows[ROW_COUNT];
+    int count = main_rows(menu, rows);
+    if (menu->cursor >= count)
+        menu->cursor = count - 1;
+    if (menu->cursor < menu->scroll)
+        menu->scroll = menu->cursor;
+    if (menu->cursor >= menu->scroll + MAIN_VISIBLE_ROWS)
+        menu->scroll = menu->cursor - MAIN_VISIBLE_ROWS + 1;
+    if (menu->scroll > count - MAIN_VISIBLE_ROWS)
+        menu->scroll = count > MAIN_VISIBLE_ROWS ? count - MAIN_VISIBLE_ROWS : 0;
     menu_base(menu, "PICO-8 POCKET");
-    for (int row = 0; row < 12; ++row)
-        selected_row(menu, row, 12 + row * 8,
-                     menu->settings->language ? ru[row] : en[row],
-                     row != 2 || menu->states[P8P_STATE_QUICK].exists);
+    for (int i = 0; i < MAIN_VISIBLE_ROWS && menu->scroll + i < count; ++i) {
+        int index = menu->scroll + i;
+        int row = rows[index];
+        const char *label = main_label(menu, row);
+        selected_row(menu, index, 12 + i * 8, label ? label : "",
+                     row != ROW_QUICK_LOAD ||
+                     menu->states[P8P_STATE_QUICK].exists);
+        if (row >= ROW_CART1 && row <= ROW_CART5)
+            fill(menu->framebuffer, 1, 12 + i * 8, 1, 5, 10);
+    }
+    if (menu->scroll > 0)
+        text(menu->framebuffer, 122, 2, "^", 6);
+    if (menu->scroll + MAIN_VISIBLE_ROWS < count)
+        text(menu->framebuffer, 122, 107, "V", 6);
     text(menu->framebuffer, 97, 121, "X FPS", 6);
     if (menu->notice_frames > 0) {
         fill(menu->framebuffer, 0, 112, 128, 8, 1);
@@ -453,7 +527,7 @@ void p8p_menu_destroy(p8p_menu_t *menu) {
 }
 
 void p8p_menu_open(p8p_menu_t *menu, p8p_runtime_t *runtime,
-                   uint16_t physical_buttons) {
+                   uint16_t physical_buttons, int cart_running) {
     const uint8_t *source;
     const uint8_t *palette;
     if (!menu || !runtime)
@@ -464,9 +538,12 @@ void p8p_menu_open(p8p_menu_t *menu, p8p_runtime_t *runtime,
         uint8_t color = palette ? palette[source[i] & 15] : source[i];
         menu->background[i] = p8p_platform_dim_color(color);
     }
+    menu->runtime = runtime;
+    menu->cart_running = cart_running;
     menu->previous_buttons = physical_buttons;
     menu->screen = SCREEN_MAIN;
     menu->cursor = 0;
+    menu->scroll = 0;
     menu->modal = MODAL_NONE;
     menu->capture_action = -1;
     refresh_state(menu, P8P_STATE_QUICK);
@@ -501,47 +578,63 @@ static void save_settings(p8p_menu_t *menu) {
 static enum p8p_menu_action update_main(p8p_menu_t *menu,
                                         p8p_runtime_t *runtime,
                                         uint16_t pressed) {
+    int rows[ROW_COUNT];
+    int count = main_rows(menu, rows);
+    int row = rows[menu->cursor < count ? menu->cursor : 0];
     if (pressed & P8P_PHYS_B)
         return P8P_MENU_CLOSE;
     if (pressed & P8P_PHYS_X)
         return P8P_MENU_TOGGLE_DIAGNOSTICS;
+    if (row >= ROW_CART1 && row <= ROW_CART5) {
+        /* PICO-8 passes 1/2 for left/right and 112 for O/X selection. */
+        int buttons = (pressed & P8P_PHYS_A) ? 112 :
+                      (pressed & P8P_PHYS_LEFT) ? 1 :
+                      (pressed & P8P_PHYS_RIGHT) ? 2 : 0;
+        int result;
+        if (!buttons)
+            return P8P_MENU_NONE;
+        result = p8p_runtime_menu_select(runtime, row - ROW_CART1 + 1, buttons);
+        if (result < 0)
+            return P8P_MENU_CART_ERROR;
+        return result ? P8P_MENU_NONE : P8P_MENU_CLOSE;
+    }
     if (!(pressed & P8P_PHYS_A))
         return P8P_MENU_NONE;
-    switch (menu->cursor) {
-    case 0: return P8P_MENU_CLOSE;
-    case 1:
+    switch (row) {
+    case ROW_RESUME: return P8P_MENU_CLOSE;
+    case ROW_QUICK_SAVE:
         if (p8p_state_save(P8P_STATE_QUICK, &menu->cart_hash, runtime) == 0) {
             refresh_state(menu, P8P_STATE_QUICK);
             set_notice(menu, tr(menu, "SAVED", "СОХРАНЕНО"));
         } else set_notice(menu, tr(menu, "SAVE FAILED", "ОШИБКА СОХР"));
         break;
-    case 2:
+    case ROW_QUICK_LOAD:
         if (menu->states[P8P_STATE_QUICK].exists &&
             p8p_state_load(P8P_STATE_QUICK, &menu->cart_hash, runtime) == 0)
             return P8P_MENU_CLOSE;
         set_notice(menu, tr(menu, "LOAD FAILED", "ОШИБКА ЗАГР"));
         break;
-    case 3:
+    case ROW_STATES:
         refresh_states(menu);
         enter_screen(menu, SCREEN_STATES, 0);
         break;
-    case 4:
+    case ROW_RESTART:
         menu->modal = MODAL_RESTART;
         enter_screen(menu, SCREEN_MODAL, 0);
         break;
-    case 5:
+    case ROW_SELECT_CART:
         menu->modal = MODAL_CART_PICKER;
         enter_screen(menu, SCREEN_MODAL, 0);
         break;
-    case 6: enter_screen(menu, SCREEN_CONTROLS, 0); break;
-    case 7: enter_screen(menu, SCREEN_DISPLAY, 0); break;
-    case 8: enter_screen(menu, SCREEN_AUDIO, 0); break;
-    case 9:
+    case ROW_CONTROLS: enter_screen(menu, SCREEN_CONTROLS, 0); break;
+    case ROW_DISPLAY: enter_screen(menu, SCREEN_DISPLAY, 0); break;
+    case ROW_AUDIO: enter_screen(menu, SCREEN_AUDIO, 0); break;
+    case ROW_LANGUAGE:
         menu->settings->language ^= 1;
         save_settings(menu);
         break;
-    case 10: enter_screen(menu, SCREEN_INFO, 0); break;
-    case 11:
+    case ROW_INFO: enter_screen(menu, SCREEN_INFO, 0); break;
+    case ROW_EXIT:
         menu->modal = MODAL_EXIT;
         enter_screen(menu, SCREEN_MODAL, 0);
         break;
@@ -554,7 +647,7 @@ static enum p8p_menu_action update_states(p8p_menu_t *menu,
                                           uint16_t pressed) {
     int slot = menu->cursor;
     if (pressed & P8P_PHYS_B) {
-        enter_screen(menu, SCREEN_MAIN, 3);
+        enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_STATES));
     } else if (pressed & P8P_PHYS_X) {
         if (p8p_state_save(slot, &menu->cart_hash, runtime) == 0) {
             refresh_state(menu, slot);
@@ -595,7 +688,7 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
         return;
     }
     if (pressed & P8P_PHYS_B) {
-        enter_screen(menu, SCREEN_MAIN, 6);
+        enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_CONTROLS));
         return;
     }
     if (!(pressed & P8P_PHYS_A))
@@ -627,14 +720,14 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
         p8p_settings_remove_cart_controls(menu->settings, &menu->cart_hash);
         save_settings(menu);
     } else if (menu->cursor == 12) {
-        enter_screen(menu, SCREEN_MAIN, 6);
+        enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_CONTROLS));
     }
 }
 
 static void update_display(p8p_menu_t *menu, uint16_t pressed) {
     if ((pressed & P8P_PHYS_B) ||
         ((pressed & P8P_PHYS_A) && menu->cursor == 1)) {
-        enter_screen(menu, SCREEN_MAIN, 7);
+        enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_DISPLAY));
         return;
     }
     if (menu->cursor == 0 &&
@@ -651,7 +744,7 @@ static void update_display(p8p_menu_t *menu, uint16_t pressed) {
 static void update_audio(p8p_menu_t *menu, uint16_t pressed) {
     if ((pressed & P8P_PHYS_B) ||
         ((pressed & P8P_PHYS_A) && menu->cursor == 2)) {
-        enter_screen(menu, SCREEN_MAIN, 8);
+        enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_AUDIO));
         return;
     }
     if (menu->cursor == 0 &&
@@ -675,7 +768,10 @@ static enum p8p_menu_action update_modal(p8p_menu_t *menu,
     if ((pressed & P8P_PHYS_B) ||
         (modal == MODAL_CART_PICKER && (pressed & P8P_PHYS_A))) {
         enter_screen(menu, modal == MODAL_DELETE ? SCREEN_STATES : SCREEN_MAIN,
-                     modal == MODAL_DELETE ? menu->modal_slot : 5);
+                     modal == MODAL_DELETE ? menu->modal_slot :
+                     main_index(menu, modal == MODAL_RESTART ? ROW_RESTART :
+                                      modal == MODAL_EXIT ? ROW_EXIT :
+                                      ROW_SELECT_CART));
         menu->modal = MODAL_NONE;
         return P8P_MENU_NONE;
     }
@@ -702,8 +798,10 @@ enum p8p_menu_action p8p_menu_update(p8p_menu_t *menu,
     uint16_t pressed;
     enum p8p_menu_action action = P8P_MENU_NONE;
     int count = 0;
+    int rows[ROW_COUNT];
     if (!menu || !runtime)
         return P8P_MENU_CLOSE;
+    menu->runtime = runtime;
     pressed = pressed_buttons |
               (physical_buttons & (uint16_t)~menu->previous_buttons);
     menu->previous_buttons = physical_buttons;
@@ -712,7 +810,7 @@ enum p8p_menu_action p8p_menu_update(p8p_menu_t *menu,
         return P8P_MENU_CLOSE;
 
     switch (menu->screen) {
-    case SCREEN_MAIN: count = 12; break;
+    case SCREEN_MAIN: count = main_rows(menu, rows); break;
     case SCREEN_STATES: count = P8P_STATE_SLOT_COUNT; break;
     case SCREEN_CONTROLS: count = 13; break;
     case SCREEN_DISPLAY: count = 2; break;
@@ -734,7 +832,7 @@ enum p8p_menu_action p8p_menu_update(p8p_menu_t *menu,
     case SCREEN_AUDIO: update_audio(menu, pressed); break;
     case SCREEN_INFO:
         if (pressed & (P8P_PHYS_A | P8P_PHYS_B))
-            enter_screen(menu, SCREEN_MAIN, 10);
+            enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_INFO));
         break;
     case SCREEN_MODAL: action = update_modal(menu, pressed); break;
     }

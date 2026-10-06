@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Cartridge pause-menu entries from `menuitem()` are listed in the Select
+  system menu, right after RESUME (24 of 65 carts in one tested library add
+  them). A selects an entry and closes the menu unless the callback returns
+  true; left/right are passed to the callback, the index's button filter
+  (`menuitem(1|0x300, ...)`) is honoured, and button glyphs in labels are
+  shown as letters. The main menu scrolls when the list is longer than the
+  screen. Menu entries are not part of save states: loading one keeps the
+  entries the cart has set up since it started. Existing save states still
+  load.
+
 ## 0.0.33 — 2026-10-06
 
 Local hardware-test build.

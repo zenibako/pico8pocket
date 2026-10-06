@@ -108,10 +108,9 @@ started and how you can help improve it.
   rainbow bring-up square. Select remains available on that screen, allowing
   the cartridge to be restarted or exited without restarting the core.
 
-This is still an alpha, not a full-compatibility release. Exact custom
-instrument/filter/reverb audio behavior, local multicart switching, the PICO-8
-pause menu, ZIP extraction and the indexed in-core browser are not implemented
-yet. Save-state persistence, menu/input behavior, profiling and the current 2X
+This is still an alpha, not a full-compatibility release. Local multicart
+switching, ZIP extraction and the indexed in-core browser are not implemented
+yet; cartridge `menuitem()` entries appear in the Select system menu. Save-state persistence, menu/input behavior, profiling and the current 2X
 presentation path have been validated on physical Pocket hardware. CPU-heavy
 cartridges and scaler behavior beyond the established 2X path still need more
 compatibility and performance work.
