@@ -311,6 +311,8 @@ int main(void) {
         "poke(0x5f55,0x60) if redirected and sget(1,1)==9 then pset(8,2,7) end\n"
         "rectfill(40,40,90,90,0) clip(140,0,20,128) circfill(130,64,40,8) rectfill(0,50,200,60,8)\n"
         "clip() if pget(64,64)==0 and pget(64,55)==0 then pset(9,2,7) end\n"
+        "if \x81==0x5a5a.8 and \x80==0 and \x99==0x5555.8 and \x8e==4 then pset(10,2,7) end\n"
+        "color(6) ovalfill(40,40,50,50,9) rect(40,40,41,41) if pget(40,40)==9 and peek(0x5f25)==9 then pset(11,2,7) end\n"
         "end\n";
     CHECK(p8p_cart_load_text_memory(text_engine_source,
                                     sizeof(text_engine_source) - 1,
@@ -542,7 +544,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 9; ++check) {
+        for (int check = 1; check <= 11; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);
@@ -611,6 +613,27 @@ int main(void) {
             CHECK(p8p_runtime_step(runtime, 0) == 0);
             CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
             p8p_cart_destroy(&pcm_cart);
+        }
+
+        {
+            /* flip() inside _update ends the frame; the loop sees the next
+             * step's input, as carts like Explorers expect. */
+            static const char flip_loop_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "n=0 m=0 function _update60()\n"
+                "if btn(5) then n+=1 while btn(5) do flip() end m+=1 end end\n"
+                "function _draw() cls() pset(n,0,7) pset(m,1,7) end\n";
+            p8p_cart_t flip_loop_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)flip_loop_source,
+                                            sizeof(flip_loop_source) - 1,
+                                            &flip_loop_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &flip_loop_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 1u << 5) == 0);
+            CHECK(p8p_runtime_step(runtime, 1u << 5) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            CHECK(p8p_runtime_framebuffer(runtime)[128 + 1] == 7);
+            p8p_cart_destroy(&flip_loop_cart);
         }
 
         if (have_celeste) {

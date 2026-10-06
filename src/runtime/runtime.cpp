@@ -70,6 +70,7 @@ struct p8p_runtime {
     uint32_t frame_count;
     int persist_ref;
     int restore_ref;
+    int frame_ref;  /* Lua dispatcher that runs _update/_draw (registry) */
     int cart_thread_ref;
     lua_State *cart_thread;
     uint8_t cart_thread_active;
@@ -175,6 +176,7 @@ static void runtime_service_lua_hook(lua_State *lua, lua_Debug *) {
      * intentionally omit it on some paths.  Yield after a bounded instruction
      * slice so one such path cannot lock the Pocket forever. */
     if (active_runtime && lua == active_runtime->cart_thread &&
+        active_runtime->cart_thread_kind != 2 &&
         ++active_runtime->cart_instruction_slices >= 16)
         lua_yield(lua, 0);
 }
@@ -196,6 +198,17 @@ static int32_t arg_int(lua_State *lua, int index, int32_t fallback) {
     if (lua_gettop(lua) < index || lua_isnil(lua, index))
         return fallback;
     return (int32_t)lua_tonumber(lua, index);
+}
+
+/* A colour argument to a drawing call also becomes the pen colour, as in
+ * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
+static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
+    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+        return runtime->draw_color;
+    int32_t color = (int32_t)lua_tonumber(lua, index);
+    runtime->draw_color = color & 255;
+    runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
+    return color;
 }
 
 static fix32 arg_number(lua_State *lua, int index, fix32 fallback) {
@@ -753,7 +766,7 @@ static int api_pset(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     p8p_runtime_t *runtime = active_runtime;
     screen_set(runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
-               arg_int(lua, 3, runtime->draw_color));
+               arg_pen(lua, 3, runtime));
     return 0;
 }
 
@@ -796,7 +809,7 @@ static int api_line(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     draw_line(runtime, x0, y0, x1, y1, color);
     return 0;
 }
@@ -808,7 +821,7 @@ static int api_rectfill(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     if (y0 > y1) { int temp = y0; y0 = y1; y1 = temp; }
 
     /* Clamp in world coordinates before walking the rows.  Real cartridges
@@ -833,7 +846,7 @@ static int api_rect(lua_State *lua) {
     int y0 = arg_int(lua, 2, 0);
     int x1 = arg_int(lua, 3, x0);
     int y1 = arg_int(lua, 4, y0);
-    int color = arg_int(lua, 5, runtime->draw_color);
+    int color = arg_pen(lua, 5, runtime);
     draw_line(runtime, x0, y0, x1, y0, color);
     draw_line(runtime, x1, y0, x1, y1, color);
     draw_line(runtime, x1, y1, x0, y1, color);
@@ -847,7 +860,7 @@ static int api_circfill(lua_State *lua) {
     int cx = arg_int(lua, 1, 0);
     int cy = arg_int(lua, 2, 0);
     int radius = arg_int(lua, 3, 4);
-    int color = arg_int(lua, 4, runtime->draw_color);
+    int color = arg_pen(lua, 4, runtime);
     if (radius < 0)
         return 0;
     int extent = radius;
@@ -868,7 +881,7 @@ static int api_circ(lua_State *lua) {
     int cx = arg_int(lua, 1, 0);
     int cy = arg_int(lua, 2, 0);
     int radius = arg_int(lua, 3, 4);
-    int color = arg_int(lua, 4, runtime->draw_color);
+    int color = arg_pen(lua, 4, runtime);
     int x = radius;
     int y = 0;
     int error = 1 - radius;
@@ -1043,7 +1056,7 @@ static int api_oval(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     draw_oval(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
               arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-              arg_int(lua, 5, active_runtime->draw_color), 0);
+              arg_pen(lua, 5, active_runtime), 0);
     return 0;
 }
 
@@ -1051,7 +1064,7 @@ static int api_ovalfill(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     draw_oval(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
               arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-              arg_int(lua, 5, active_runtime->draw_color), 1);
+              arg_pen(lua, 5, active_runtime), 1);
     return 0;
 }
 
@@ -2432,6 +2445,23 @@ static void register_pico8_button_constants(lua_State *lua) {
         push_int(lua, button);
         lua_setglobal(lua, utf8_names[button]);
     }
+    /* Glyphs 128-153 double as fill patterns, e.g. fillp(\x81) is a
+     * checkerboard with transparency.  Values as in PICO-8 (via Fake-08);
+     * the button glyphs above keep their button numbers. */
+    static const struct { uint8_t glyph; uint32_t bits; } fill_patterns[] = {
+        {0x80, 0x00000000u}, {0x81, 0x5a5a8000u}, {0x82, 0x511f8000u},
+        {0x84, 0x7d7d8000u}, {0x85, 0xb81d8000u}, {0x86, 0xf99f8000u},
+        {0x87, 0x51bf8000u}, {0x88, 0xb5bf8000u}, {0x89, 0x999f8000u},
+        {0x8a, 0xb11f8000u}, {0x8c, 0xa0e08000u}, {0x8d, 0x9b3f8000u},
+        {0x8f, 0xb1bf8000u}, {0x90, 0xf5ff8000u}, {0x92, 0xb15f8000u},
+        {0x93, 0x1b1f8000u}, {0x95, 0xf5bf8000u}, {0x96, 0x7adf8000u},
+        {0x98, 0x0f0f8000u}, {0x99, 0x55558000u},
+    };
+    for (size_t i = 0; i < sizeof(fill_patterns) / sizeof(fill_patterns[0]); ++i) {
+        pico8_name[0] = (char)fill_patterns[i].glyph;
+        lua_pushnumber(lua, fix32::frombits((int32_t)fill_patterns[i].bits));
+        lua_setglobal(lua, pico8_name);
+    }
 }
 
 static const char bootstrap_lua[] =
@@ -2525,37 +2555,54 @@ static int finish_cart_load(p8p_runtime_t *runtime) {
     return start_init_thread(runtime);
 }
 
-static int dispatch_frame(lua_State *lua) {
+/* Profile events raised by the Lua frame dispatcher (0-3, see below). */
+static int frame_profile_event(lua_State *lua) {
+    static const p8p_runtime_profile_event_t events[4] = {
+        P8P_PROFILE_UPDATE_BEGIN, P8P_PROFILE_UPDATE_END,
+        P8P_PROFILE_DRAW_BEGIN, P8P_PROFILE_DRAW_END,
+    };
     p8p_runtime_t *runtime = active_runtime;
-    const char *update = runtime->target_fps == 60 ? "_update60" : "_update";
+    int event = (int)lua_tointeger(lua, 1);
+    if (runtime && runtime->profile_hook && event >= 0 && event < 4)
+        runtime->profile_hook(runtime->profile_userdata, events[event]);
+    return 0;
+}
 
-    lua_getglobal(lua, update);
-    if (lua_isfunction(lua, -1)) {
-        if (runtime->profile_hook)
-            runtime->profile_hook(runtime->profile_userdata,
-                                  P8P_PROFILE_UPDATE_BEGIN);
-        lua_call(lua, 0, 0);
-        if (runtime->profile_hook)
-            runtime->profile_hook(runtime->profile_userdata,
-                                  P8P_PROFILE_UPDATE_END);
-    } else {
-        lua_pop(lua, 1);
-    }
+/*
+ * _update/_draw run in a coroutine so flip() inside them ends the frame as on
+ * PICO-8: the next step resumes after flip() with fresh input.  Carts use this
+ * for in-frame loops such as "while btn(5) do ... flip() end".  The
+ * dispatcher lives in the registry, not in _G, so the Eris permanent-object
+ * numbering (and existing save states) is unchanged.
+ */
+static const char frame_dispatcher_lua[] =
+    "local prof=...\n"
+    "return function(update, draw)\n"
+    " local u=_ENV[update]\n"
+    " if u then prof(0) u() prof(1) end\n"
+    " if draw then local d=_draw if d then prof(2) d() prof(3) end end\n"
+    "end\n";
 
-    if (runtime->draw_frame) {
-        lua_getglobal(lua, "_draw");
-        if (lua_isfunction(lua, -1)) {
-            if (runtime->profile_hook)
-                runtime->profile_hook(runtime->profile_userdata,
-                                      P8P_PROFILE_DRAW_BEGIN);
-            lua_call(lua, 0, 0);
-            if (runtime->profile_hook)
-                runtime->profile_hook(runtime->profile_userdata,
-                                      P8P_PROFILE_DRAW_END);
-        } else {
-            lua_pop(lua, 1);
-        }
+static int start_frame_thread(p8p_runtime_t *runtime) {
+    runtime->cart_thread = lua_newthread(runtime->lua);
+    runtime->cart_thread_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
+    runtime->cart_thread_kind = 2;
+    lua_rawgeti(runtime->cart_thread, LUA_REGISTRYINDEX, runtime->frame_ref);
+    lua_pushstring(runtime->cart_thread,
+                   runtime->target_fps == 60 ? "_update60" : "_update");
+    lua_pushboolean(runtime->cart_thread, runtime->draw_frame);
+    install_service_hook(runtime);
+    int status = lua_resume(runtime->cart_thread, runtime->lua, 2);
+    if (status == LUA_YIELD) {
+        runtime->cart_thread_active = 1;
+        return 0;
     }
+    if (status != LUA_OK) {
+        set_thread_error(runtime, "frame", runtime->cart_thread);
+        release_cart_thread(runtime);
+        return -2;
+    }
+    release_cart_thread(runtime);
     return 0;
 }
 
@@ -2686,6 +2733,16 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
      * the built-ins so state files keep the same permanent-object IDs. */
     lua_pushnil(runtime->lua);
     lua_setglobal(runtime->lua, "debug");
+    if (luaL_loadstring(runtime->lua, frame_dispatcher_lua) != LUA_OK) {
+        set_error(runtime, "frame dispatcher");
+        return -3;
+    }
+    lua_pushcfunction(runtime->lua, frame_profile_event);
+    if (lua_pcall(runtime->lua, 1, 1, 0) != LUA_OK) {
+        set_error(runtime, "frame dispatcher");
+        return -3;
+    }
+    runtime->frame_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     runtime->cart_thread = lua_newthread(runtime->lua);
     runtime->cart_thread_ref = luaL_ref(runtime->lua, LUA_REGISTRYINDEX);
     runtime->cart_thread_kind = 0;
@@ -2830,11 +2887,8 @@ extern "C" int p8p_runtime_step_with_draw(p8p_runtime_t *runtime,
         install_service_hook(runtime);
         return 0;
     }
-    lua_pushcfunction(runtime->lua, dispatch_frame);
-    if (lua_pcall(runtime->lua, 0, 0, 0) != LUA_OK) {
-        set_error(runtime, "frame");
+    if (start_frame_thread(runtime) != 0)
         return -2;
-    }
 
     if (runtime->restart_requested)
         return restart_current_cart(runtime);

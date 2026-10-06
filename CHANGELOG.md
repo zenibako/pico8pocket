@@ -95,6 +95,17 @@ Local hardware-test build.
   (checked on 34 carts); audio CPU in Kiloman roughly doubles on the host.
 - Saved states keep the 0.0.32 audio layout; instrument voices and filter
   memory are not saved and restart on the next note.
+- `serial(0x808, ...)` plays raw 8-bit PCM at 5512 Hz and `stat(108)` reports
+  the queued samples; Impossible Mission RT previously hung waiting on it.
+- `_update` and `_draw` run as a coroutine, so `flip()` inside them ends the
+  frame as in PICO-8 (Kiloman's pauses, Explorers' menus) instead of
+  returning immediately.
+- The fill-pattern glyph constants (`▒`, `█`, `…`) are defined, so
+  `fillp(▒)` no longer clears the pattern.
+- A colour passed to `pset`, `line`, `rect(fill)`, `circ(fill)` or
+  `oval(fill)` also becomes the pen colour, as in PICO-8.
+- An inverted clip rectangle no longer produces negative-length spans; Snail
+  crashed on it.
 
 Profiling Tetyis on the host showed its own `_draw` repeats the HUD, falling
 piece and ghost piece ten times per frame (a misplaced `end`). Together, these
