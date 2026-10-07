@@ -596,7 +596,12 @@ static enum p8p_menu_action update_main(p8p_menu_t *menu,
         result = p8p_runtime_menu_select(runtime, row - ROW_CART1 + 1, buttons);
         if (result < 0)
             return P8P_MENU_CART_ERROR;
-        return result ? P8P_MENU_NONE : P8P_MENU_CLOSE;
+        if (!result)
+            return P8P_MENU_CLOSE;
+        /* The callback may have added or removed entries: stay on its row
+         * (RESUME if it removed itself). */
+        menu->cursor = main_index(menu, row);
+        return P8P_MENU_NONE;
     }
     if (!(pressed & P8P_PHYS_A))
         return P8P_MENU_NONE;

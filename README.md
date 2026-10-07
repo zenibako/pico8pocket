@@ -203,7 +203,9 @@ cartridge.
 Upgrading from a release that installed `Askent.pico8pocket`: move your carts
 from `/Assets/pico8pocket/common/cards/` to `/Assets/pico8/common/cards/`, then
 delete `/Cores/Askent.pico8pocket`, `/Assets/pico8pocket` and
-`/Platforms/pico8pocket.json`.
+`/Platforms/pico8pocket.json`. Save states, settings and cartdata are kept per
+platform under `/Saves`: to keep them, move the contents of
+`/Saves/pico8pocket/` to `/Saves/pico8/` before starting the new core.
 
 ## Cartridge location
 

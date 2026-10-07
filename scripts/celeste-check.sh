@@ -31,7 +31,8 @@ mkdir -p "$BASELINE_DIR"
 status=0
 for cart in "${carts[@]}"; do
     name="$(basename "$cart")"
-    result="$("$SCAN" "$cart" "$FRAMES" "$SEED" 2>&1 | tail -1)"
+    # A failing scan must reach the FAILED report, not stop the script.
+    result="$("$SCAN" "$cart" "$FRAMES" "$SEED" 2>&1 | tail -1 || true)"
     if [[ "$result" != ok* ]]; then
         echo "$name: FAILED: $result"
         status=1
@@ -47,7 +48,9 @@ for cart in "${carts[@]}"; do
         base_total="$(valgrind --tool=callgrind --callgrind-out-file=/dev/null \
             "$SCAN" "$cart" 0 "$SEED" 2>&1 |
             sed -n 's/.*Collected : \([0-9]*\).*/\1/p')"
-        per_frame=$(( (total - base_total) / FRAMES ))
+        if [[ -n "$total" && -n "$base_total" ]] && (( FRAMES > 0 )); then
+            per_frame=$(( (total - base_total) / FRAMES ))
+        fi
     fi
 
     line="hash=$hash avg=$avg"

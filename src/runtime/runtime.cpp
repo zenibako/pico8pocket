@@ -3338,7 +3338,9 @@ extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
         lua_pop(runtime->lua, 1);
         return choose ? 0 : 1;
     }
-    push_int(runtime->lua, buttons);
+    /* Called from the host loop, outside any C function, so use the checked
+     * API push rather than push_int. */
+    lua_pushnumber(runtime->lua, fix32(buttons));
     if (lua_pcall(runtime->lua, 1, 1, 0) != LUA_OK) {
         set_error(runtime, "menu item");
         return -1;
