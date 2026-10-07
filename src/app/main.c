@@ -64,7 +64,7 @@ static void draw_profile(uint8_t *fb, unsigned logical_fps,
                          unsigned visible_fps, unsigned update_us,
                          unsigned draw_us, unsigned audio_us,
                          unsigned present_us, unsigned render_divisor,
-                         unsigned lua_instructions,
+                         unsigned lua_instructions, unsigned full_us,
                          const p8p_runtime_api_profile_t *apis) {
     draw_metric(fb, 0, 0,  'L', 7,  logical_fps, 2);
     draw_metric(fb, 0, 7,  'V', 6,  visible_fps, 2);
@@ -74,6 +74,10 @@ static void draw_profile(uint8_t *fb, unsigned logical_fps,
     draw_metric(fb, 0, 35, 'P', 12, (present_us + 500) / 1000, 2);
     draw_metric(fb, 0, 42, 'R', 14, render_divisor, 2);
     draw_metric(fb, 0, 49, 'K', 10, (lua_instructions + 500) / 1000, 3);
+    /* The whole runtime step the frame-skip scheduler times: update and
+     * draw plus audio serviced mid-frame, GC and frame setup.  It keeps
+     * R1 while F + A + P fits the budget (30 ms at 30 fps). */
+    draw_metric(fb, 0, 56, 'F', 13, (full_us + 500) / 1000, 2);
     if (apis) {
         draw_metric(fb, 18, 0,  'S', 12, apis->calls[P8P_API_SPRITE], 3);
         draw_metric(fb, 18, 7,  'G', 8,  apis->calls[P8P_API_GRAPHICS], 3);
@@ -653,7 +657,7 @@ int main(int argc, char **argv) {
                          runtime_profile.average_draw_us,
                          average_audio_us, average_present_us,
                          (unsigned)render_divisor, average_instructions,
-                         &api_profile);
+                         average_draw_runtime_us, &api_profile);
         }
         if (running) {
             uint32_t audio_start_us = p8p_platform_time_us();
