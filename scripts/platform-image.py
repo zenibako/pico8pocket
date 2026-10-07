@@ -40,6 +40,8 @@ def read_png(path):
             trns = chunk
     if depth != 8 or interlace:
         sys.exit(f"{path}: only 8-bit, non-interlaced PNGs are supported")
+    if ctype not in (0, 2, 3, 4, 6) or (ctype == 3 and plte is None):
+        sys.exit(f"{path}: unsupported PNG colour type {ctype}")
     bpp = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
     raw, stride = zlib.decompress(idat), width * bpp
     rows, prev, i = [], bytearray(stride), 0
