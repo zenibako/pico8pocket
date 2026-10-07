@@ -1,5 +1,120 @@
 # Changelog
 
+## Unreleased
+
+- The core is now `zenibako.pico8` on the `pico8` platform: its files live
+  in `Cores/zenibako.pico8`, `Assets/pico8/...` and `Platforms/pico8.json`
+  instead of `Askent.pico8pocket`/`pico8pocket`. To upgrade, move your
+  carts from `Assets/pico8pocket/common/cards/` to
+  `Assets/pico8/common/cards/` and delete `Cores/Askent.pico8pocket`,
+  `Assets/pico8pocket` and `Platforms/pico8pocket.json`. Save states,
+  settings and cartdata kept by the Pocket under `Saves/pico8pocket` move
+  to `Saves/pico8` the same way.
+- Cartridge pause-menu entries from `menuitem()` are listed in the Select
+  system menu, right after RESUME (24 of 65 carts in one tested library add
+  them). A selects an entry and closes the menu unless the callback returns
+  true; left/right are passed to the callback, the index's button filter
+  (`menuitem(1|0x300, ...)`) is honoured, and button glyphs in labels are
+  shown as letters. The main menu scrolls when the list is longer than the
+  screen. Menu entries are not part of save states: loading one keeps the
+  entries the cart has set up since it started. Existing save states still
+  load.
+- Audio voices are synthesized at 24 kHz (PICO-8 itself runs at 22050 Hz)
+  and interpolated to the 48 kHz output, roughly halving audio CPU: Kiloman's
+  music drops from about 890 to 470 host instructions per output sample,
+  Tetyis by a third. Loudness envelopes and pitch match the previous output
+  (checked on seven carts); save states keep their 48 kHz units, so files
+  move freely between this and earlier builds.
+- Frame skipping no longer gets stuck off. The update-only cost it relies on
+  was only measured on skipped frames, so one slow update (Kiloman loads the
+  next room inside `_update` when you drop into it) could switch skipping
+  off for the rest of the room at about 12 FPS. While a cart is over budget
+  without skipping, one draw in 15 is now skipped to re-measure.
+- `menuitem(i, label)` without a callback relabels an entry and keeps its
+  callback, as in PICO-8. Moss Moss's colorblind toggle could be switched
+  on but not off.
+- `split()` of a non-string (`nil`, `false`) returns nothing instead of
+  raising an error, as in PICO-8. Turning Moss Moss's colorblind mode back
+  off stopped the cart with "bad argument #1 to 'split'".
+- `==` and `~=` compare numbers, nil, booleans and strings inside the
+  interpreter loop instead of calling out; only tables and userdata, which
+  may have `__eq`, still take the call (2-3% of Moss Moss's frame).
+- Save states with a large Lua heap save again. The store reserved the
+  compressor's worst case for the raw size, so any state over ~256 KB raw
+  was refused even though it compresses far smaller: Moss Moss's ~500 KB
+  state takes 84 KB.
+- Global names read inside `local _ENV=obj` code that miss the object and
+  resolve through its `__index` table are found without leaving the
+  interpreter loop. Moss Moss, which runs its objects this way, needs 4.4%
+  fewer host instructions per frame; field reads and `__index` functions
+  (Celeste 2) are unaffected. `luaV_equalobj_` moved out of BRAM to make
+  room, as `==` no longer needs it for common types.
+- A global name that resolves to nil no longer interns the
+  `"__PICO8_SANDBOX"` string for the env-fallback lookup; the sandbox is
+  read from the registry's globals slot. Celeste 2 does about 360 such
+  lookups per frame and needs 4.4% fewer host instructions per frame; the
+  smaller interpreter loop frees about 760 bytes of BRAM.
+- PICO-8 API calls cost less: arguments are read straight from the Lua
+  stack instead of through `lua_gettop`/`lua_type`/`lua_tonumberx`, and the
+  interpreter calls light C functions through a short dedicated path when no
+  call or return hooks are set. Celeste 2 makes about 1,900 such calls per
+  frame; together with the sandbox change it needs 9.4% fewer host
+  instructions per frame than before, Moss Moss 2.7% fewer.
+- The frame-skip budget at 30 fps is 32 ms instead of 30 ms (a frame lasts
+  33.3 ms). Celeste 2's tower rooms and grapple rope, whose frames fit,
+  were dropping to every other frame drawn; on the Pocket they now stay at
+  30 visible FPS.
+- The diagnostics overlay shows F, the full runtime step the frame-skip
+  scheduler times (update and draw plus audio serviced mid-frame, GC and
+  frame setup). R1 is kept while F + A + P fits the budget; U and D alone
+  can add up to less.
+- `time()`/`t()` compute frames ÷ FPS with integer arithmetic instead of a
+  double-precision divide and conversion, which the Pocket emulates in
+  software (identical results, checked over 236 million frame counts).
+  Celeste 2 calls `time()` for every pixel of its grapple rope: drawing an
+  80-pixel rope costs about 30% fewer instructions.
+- Table reads and writes with a constant name (`spr`, `level.width`,
+  `self.x`, `o.x = ...`) remember, per instruction, where in the table they
+  last found the key, and check that one slot before doing a full hash
+  lookup. Objects built the same way share the hint. In Celeste 2's tower
+  room the RV32 build runs 4.8% fewer instructions per frame (measured on
+  an RV32 build under QEMU). A hint is the node's byte offset, kept in an
+  array parallel to the bytecode (four bytes per Lua instruction), so a hit
+  needs no index arithmetic: another 2.8% in that room, together with
+  `<`/`<=` comparing numbers inside the interpreter loop instead of calling
+  out.
+- The interpreter keeps the Lua program counter in a register and writes
+  it back only before calls, errors, metamethods and the collector, checks
+  hooks only at servicepoints, and no longer range-checks every opcode. On
+  the Pocket the per-instruction dispatch drops from 17 to 11 RV32
+  instructions with no branches, and the interpreter loop takes 600 fewer
+  bytes of BRAM. Error messages report the same lines as before.
+- `load()` and `loadfile()` accept Lua source only, not precompiled
+  bytecode, which Lua 5.2 runs without verifying (PICO-8 has neither
+  function).
+- Fill-pattern shapes (`fillp` with `rectfill`, `circfill` and friends) are
+  drawn four pixels at a time instead of clipping and pattern-testing each
+  pixel separately, and `rectfill` works out its pattern rows once per
+  rectangle. Celeste 2's tower room, whose background columns and fog are
+  pattern fills, needs 29% fewer host instructions per drawn frame. 27 of
+  the 65 tested carts use `fillp`; their frames are unchanged, as are those
+  of a randomized pattern/camera/clip/palette test cart.
+- The interpreter checks its service hook (audio and input pumping during
+  long frames) only at jumps, loop back-edges and calls instead of before
+  every instruction, with the hook period cut from 8192 to 2048 so service
+  happens as often as before. Celeste 2 needs 12.7% fewer host instructions
+  per frame than when the Celeste check was added. Carts that
+  split a long `_init` across frames may now reach their first frame a
+  frame or so earlier or later.
+- The `all()` iterator reads the table directly and computes `#t` only at
+  empty slots instead of on every step. Moss Moss, which iterates with
+  `all()` throughout, needs about 26% fewer host instructions per frame.
+- Numbers are converted to text (`tostr`, `print(n)`, `..`) with integer
+  arithmetic instead of a double-precision `sprintf`, which the Pocket's
+  single-precision CPU emulated in software: about 4200 RV32 instructions
+  per number down to about 40. The text is identical (checked for all 2^32
+  values against glibc and against the SDK's musl).
+
 ## 0.0.33 — 2026-10-06
 
 Local hardware-test build.

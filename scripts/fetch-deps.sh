@@ -27,6 +27,16 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-vm-fastpath.patch"
     "$PROJECT_ROOT/patches/z8lua-number-parse.patch"
     "$PROJECT_ROOT/patches/z8lua-local-compound.patch"
+    "$PROJECT_ROOT/patches/z8lua-number-format.patch"
+    "$PROJECT_ROOT/patches/z8lua-split-nonstring.patch"
+    "$PROJECT_ROOT/patches/z8lua-eq-fastpath.patch"
+    "$PROJECT_ROOT/patches/z8lua-index-chain.patch"
+    "$PROJECT_ROOT/patches/z8lua-sandbox-index.patch"
+    "$PROJECT_ROOT/patches/z8lua-ccall-fastpath.patch"
+    "$PROJECT_ROOT/patches/z8lua-servicepoints.patch"
+    "$PROJECT_ROOT/patches/z8lua-pc-register.patch"
+    "$PROJECT_ROOT/patches/z8lua-inline-cache.patch"
+    "$PROJECT_ROOT/patches/z8lua-vm-tuning.patch"
 )
 
 fetch_one() {

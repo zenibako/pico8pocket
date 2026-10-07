@@ -1,4 +1,6 @@
 #include "p8p/cart.h"
+#include "p8p/menu.h"
+#include "p8p/platform.h"
 #include "p8p/runtime.h"
 #include "p8p/state_store.h"
 #include "miniz.h"
@@ -7,6 +9,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
+/* Platform hooks used by the system menu. */
+void p8p_platform_audio_set_volume(unsigned) {}
+unsigned p8p_platform_set_scale(unsigned scale) { return scale; }
+uint8_t p8p_platform_dim_color(uint8_t color) { return color; }
 
 static int failures;
 static int service_hook_calls;
@@ -97,6 +104,88 @@ static int test_cartdata_save(void *userdata, const char *id,
     } \
 } while (0)
 
+static uint32_t frame_hash(p8p_runtime_t *runtime) {
+    const uint8_t *framebuffer = p8p_runtime_framebuffer(runtime);
+    uint32_t hash = 2166136261u;
+    for (int pixel = 0; pixel < 128 * 128; ++pixel)
+        hash = (hash ^ framebuffer[pixel]) * 16777619u;
+    return hash;
+}
+
+/* Start presses, then deterministic pseudo-random play: walking, jumping
+ * (O) and dashing (X). */
+static uint8_t celeste_input(int frame) {
+    if (frame < 60)
+        return 0;
+    if (frame % 60 < 4 && frame < 240)
+        return (1u << 4) | (1u << 5);
+    uint32_t r = (uint32_t)frame / 12u * 2654435761u;
+    uint8_t buttons = (uint8_t)(1u << ((r >> 28) & 3u));
+    if (((r >> 20) & 7u) == 0)
+        buttons |= 1u << 4;
+    if (((r >> 12) & 15u) == 0)
+        buttons |= 1u << 5;
+    return buttons;
+}
+
+/*
+ * Celeste Classic (1 or 2) is the priority acceptance cart.  The cart is
+ * supplied locally (assets/cards/, never committed).  It must load at
+ * 30 FPS, play 600 frames of scripted input without errors while the
+ * picture changes and sound plays, and a state saved mid-game must replay
+ * the following frames exactly.
+ */
+static void celeste_acceptance(p8p_runtime_t *runtime, const char *path,
+                               p8p_cart_t *cart) {
+    enum { PLAY = 600, REPLAY = 90 };
+    uint32_t expected[REPLAY];
+    uint32_t previous = 0;
+    int changes = 0;
+    static int16_t audio[1600 * 2];
+    int64_t audio_energy = 0;
+    void *state = NULL;
+    size_t state_size = 0;
+    int loaded = p8p_runtime_load(runtime, cart);
+    if (loaded != 0)
+        fprintf(stderr, "%s load: %s\n", path, p8p_runtime_error(runtime));
+    CHECK(loaded == 0);
+    if (loaded != 0)
+        return;
+    CHECK(p8p_runtime_target_fps(runtime) == 30);
+    for (int frame = 0; frame < PLAY; ++frame) {
+        if (p8p_runtime_step(runtime, celeste_input(frame)) != 0) {
+            fprintf(stderr, "%s frame %d: %s\n", path, frame,
+                    p8p_runtime_error(runtime));
+            CHECK(!"Celeste runtime error");
+            return;
+        }
+        p8p_runtime_audio_render(runtime, audio, 1600);
+        for (int i = 0; i < 1600; ++i)
+            audio_energy += audio[i * 2] < 0 ? -audio[i * 2] : audio[i * 2];
+        uint32_t hash = frame_hash(runtime);
+        changes += hash != previous;
+        previous = hash;
+    }
+    CHECK(changes > PLAY / 4);
+    CHECK(audio_energy > 0);
+
+    CHECK(p8p_runtime_save_state(runtime, &state, &state_size) == 0);
+    for (int frame = 0; frame < REPLAY; ++frame) {
+        CHECK(p8p_runtime_step(runtime, celeste_input(PLAY + frame)) == 0);
+        expected[frame] = frame_hash(runtime);
+    }
+    CHECK(p8p_runtime_load_state(runtime, state, state_size) == 0);
+    int mismatches = 0;
+    for (int frame = 0; frame < REPLAY; ++frame) {
+        CHECK(p8p_runtime_step(runtime, celeste_input(PLAY + frame)) == 0);
+        mismatches += frame_hash(runtime) != expected[frame];
+    }
+    printf("%s: %d/%d frames changed, state %zu bytes, replay mismatches %d\n",
+           path, changes, PLAY, state_size, mismatches);
+    CHECK(mismatches == 0);
+    free(state);
+}
+
 #define TEST_NOTES_4 "21070210702107021070"
 #define TEST_NOTES_32 \
     TEST_NOTES_4 TEST_NOTES_4 TEST_NOTES_4 TEST_NOTES_4 \
@@ -144,7 +233,6 @@ int main(void) {
     p8p_cart_t cart = {};
     p8p_cart_t png_cart = {};
     p8p_cart_t legacy_cart = {};
-    p8p_cart_t celeste_cart = {};
     p8p_cart_t flip_cart = {};
     p8p_cart_t glyph_cart = {};
     p8p_cart_t nested_short_if_cart = {};
@@ -171,7 +259,6 @@ int main(void) {
     unsigned char config_readback[32];
     char store_path[] = "/tmp/pico8pocket-state-XXXXXX";
     int store_fd = mkstemp(store_path);
-    int have_celeste = 0;
 
     CHECK(store_fd >= 0);
     if (store_fd >= 0)
@@ -200,10 +287,6 @@ int main(void) {
     CHECK(p8p_cart_load_file(
         ".deps/fake-08/test/carts/test_legacypng_cart.p8.png", &legacy_cart) == 0);
     CHECK(strcmp(legacy_cart.lua, "print(\"0.1.10c\")\n") == 0);
-    have_celeste = p8p_cart_load_file("assets/cards/celeste.p8.png",
-                                     &celeste_cart) == 0;
-    if (have_celeste)
-        CHECK(celeste_cart.lua_size > 20000);
     static const uint8_t flip_source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
         "n=0 repeat n+=1 pset(n,1,8) flip() until n==3\n"
@@ -315,6 +398,16 @@ int main(void) {
         "color(6) ovalfill(40,40,50,50,9) rect(40,40,41,41) if pget(40,40)==9 and peek(0x5f25)==9 then pset(11,2,7) end\n"
         "palt(9,true) pal() if peek(0x5f09)==9 and peek(0x5f00)==0x10 then pset(12,2,7) end\n"
         "cstore() if trace(\"here\")==\"here\" and trace()==\"\" then pset(13,2,7) end\n"
+        "if tostr(1.5)..\",\"..-32768 ..\",\"..(1/3)..\",\"..0x0.0001 ..\",\"..-0x0.0001 ..\",\"..32767.99999 ..\",\"..-2.25 ==\"1.5,-32768,0.3333,0,-0,32768,-2.25\" then pset(15,2,7) end\n"
+        "local n=0 for v in all(split(false,\",\")) do n+=1 end if n==0 and split(nil)==nil and #split(\"1,2\")==2 and split(12)[1]==12 then pset(16,2,7) end\n"
+        "local m={__eq=function() return true end} local ta,tb=setmetatable({},m),setmetatable({},m) local sa=\"ab\" local sb=\"a\"..\"b\"\n"
+        "if 1==1.0 and 2~=3 and sa==sb and sa~=\"ac\" and nil~=false and false==false and true~=false and ta==tb and {}~={} and ta==ta then pset(17,2,7) end\n"
+        "local A={x=1} local B=setmetatable({y=2},{__index=A}) local C=setmetatable({},{__index=B})\n"
+        "local F=setmetatable({},{__index=function(t,k) return k..\"!\" end})\n"
+        "local H=setmetatable({[0.5]=\"half\"},{__index={[0.5]=\"wrong\"}})\n"
+        "local D=C for i=1,6 do D=setmetatable({},{__index=D}) end\n"
+        "local E=setmetatable({},{__index=_ENV}) local function inenv() local _ENV=E return x==nil and pset~=nil end\n"
+        "if C.x==1 and C.y==2 and C.z==nil and F.q==\"q!\" and H[0.5]==\"half\" and D.x==1 and inenv() then pset(18,2,7) end\n"
         "lc=5 do local lc*=2 local ls=\"a\" local ls..=\"b\" if lc==10 and ls==\"ab\" then pset(14,2,7) end end\n"
         "if lc~=5 then pset(14,2,0) end\n"
         "end\n";
@@ -478,6 +571,34 @@ int main(void) {
                                       &state_meta) == 0);
         CHECK(state_meta.exists == 0);
 
+        {
+            /* A state whose raw size exceeds the 256 KiB slot (Moss Moss
+             * saves ~500 KB) must still save when it compresses to fit. */
+            static const char big_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "big={} for i=1,12000 do big[i]=\"item \"..i end\n"
+                "function _draw() cls() if #big==12000 and big[777]==\"item 777\" then pset(0,0,7) end end\n";
+            p8p_cart_t big_cart = {};
+            p8p_cart_hash_t big_hash = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)big_source,
+                                            sizeof(big_source) - 1,
+                                            &big_cart) == 0);
+            p8p_cart_content_hash(&big_cart, &big_hash);
+            CHECK(p8p_runtime_load(runtime, &big_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_state_save_file(store_path, &big_hash, runtime) == 0);
+            CHECK(p8p_state_get_meta_file(store_path, &big_hash,
+                                          &state_meta) == 0);
+            CHECK(state_meta.exists == 1);
+            CHECK(state_meta.raw_size > 256u * 1024u);
+            CHECK(p8p_runtime_load(runtime, &big_cart) == 0);
+            CHECK(p8p_state_load_file(store_path, &big_hash, runtime) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+            CHECK(p8p_state_delete_file(store_path, &big_hash) == 0);
+            p8p_cart_destroy(&big_cart);
+        }
+
         loaded = p8p_runtime_load(runtime, &flip_cart);
         CHECK(loaded == 0);
         CHECK(p8p_runtime_framebuffer(runtime)[1 * 128 + 1] == 8);
@@ -548,7 +669,7 @@ int main(void) {
             fprintf(stderr, "text engine load: %s\n", p8p_runtime_error(runtime));
         CHECK(loaded == 0);
         CHECK(p8p_runtime_step(runtime, 0) == 0);
-        for (int check = 1; check <= 14; ++check) {
+        for (int check = 1; check <= 18; ++check) {
             if (p8p_runtime_framebuffer(runtime)[2 * 128 + check] != 7)
                 fprintf(stderr, "text engine check %d failed\n", check);
             CHECK(p8p_runtime_framebuffer(runtime)[2 * 128 + check] == 7);
@@ -594,6 +715,26 @@ int main(void) {
             CHECK(custom > plain - 4 && custom < plain + 4);
             CHECK(octave > 2 * plain - 8 && octave < 2 * plain + 8);
             CHECK(detuned > 0 && detuned_hash != plain_hash);
+        }
+
+        {
+            /* Saved states keep 48 kHz units while voices run at 24 kHz: a
+             * looping note must continue at the same pitch after a save and
+             * load (SFX 0, key 24 ~262 Hz: ~105 crossings in 0.2 s). */
+            audio_crossings_for(runtime, "sfx(0)");
+            void *audio_state = NULL;
+            size_t audio_state_size = 0;
+            CHECK(p8p_runtime_save_state(runtime, &audio_state,
+                                         &audio_state_size) == 0);
+            int before = audio_crossings(runtime, 9600);
+            CHECK(p8p_runtime_load_state(runtime, audio_state,
+                                         audio_state_size) == 0);
+            int after = audio_crossings(runtime, 9600);
+            fprintf(stderr, "audio state round trip: %d -> %d crossings\n",
+                    before, after);
+            CHECK(before > 95 && before < 115);
+            CHECK(after >= before - 2 && after <= before + 2);
+            free(audio_state);
         }
 
         {
@@ -678,51 +819,128 @@ int main(void) {
             p8p_cart_destroy(&flip_state_cart);
         }
 
-        if (have_celeste) {
-            loaded = p8p_runtime_load(runtime, &celeste_cart);
-            if (loaded != 0)
-                fprintf(stderr, "Celeste load: %s\n", p8p_runtime_error(runtime));
-            CHECK(loaded == 0);
-            CHECK(p8p_runtime_target_fps(runtime) == 30);
-            for (int frame = 0; frame < 120 && loaded == 0; ++frame) {
-                int step = p8p_runtime_step(runtime,
-                                           frame == 90 ? (1u << 4) : 0);
-                if (step != 0) {
-                    fprintf(stderr, "Celeste frame %d: %s\n", frame,
-                            p8p_runtime_error(runtime));
-                    loaded = step;
-                }
+        {
+            /* all(): deleting the current or other items and adding during
+             * iteration, empty and non-table arguments. */
+            static const char all_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "function run(t,f) local s=\"\" for v in all(t) do f(t,v) s..=v end return s end\n"
+                "function _draw() cls()\n"
+                "if run({1,2,3,4},function(t,v) if v==2 then del(t,v) end end)==\"1234\" then pset(0,0,7) end\n"
+                "if run({1,2,3},function(t,v) del(t,v) end)==\"123\" then pset(1,0,7) end\n"
+                "if run({1,2},function(t,v) if v==1 then add(t,9) end end)==\"129\" then pset(2,0,7) end\n"
+                "if run({5,6,7},function(t,v) if v==5 then deli(t,3) end end)==\"56\" then pset(3,0,7) end\n"
+                "local n=0 for v in all({}) do n+=1 end for v in all(nil) do n+=1 end\n"
+                "if n==0 then pset(4,0,7) end end\n";
+            p8p_cart_t all_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)all_source,
+                                            sizeof(all_source) - 1,
+                                            &all_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &all_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            for (int check = 0; check < 5; ++check) {
+                if (p8p_runtime_framebuffer(runtime)[check] != 7)
+                    fprintf(stderr, "all() check %d failed\n", check);
+                CHECK(p8p_runtime_framebuffer(runtime)[check] == 7);
             }
-            CHECK(loaded == 0);
-            framebuffer = p8p_runtime_framebuffer(runtime);
-            unsigned framebuffer_sum = 0;
-            for (int pixel = 0; pixel < 128 * 128; ++pixel)
-                framebuffer_sum += framebuffer[pixel];
-            CHECK(framebuffer_sum != 0);
-            CHECK(p8p_runtime_save_state(runtime, &saved_state,
-                                         &saved_state_size) == 0);
-            if (saved_state) {
-                mz_ulong compressed_capacity = mz_compressBound(saved_state_size);
-                unsigned char *compressed =
-                    (unsigned char *)malloc((size_t)compressed_capacity);
-                CHECK(compressed != NULL);
-                if (compressed) {
-                    CHECK(mz_compress2(compressed, &compressed_capacity,
-                                       (const unsigned char *)saved_state,
-                                       saved_state_size, MZ_BEST_SPEED) == MZ_OK);
-                    printf("Celeste state: %zu raw, %lu compressed\n",
-                           saved_state_size,
-                           (unsigned long)compressed_capacity);
-                    free(compressed);
-                }
-                CHECK(p8p_runtime_step(runtime, 0) == 0);
-                CHECK(p8p_runtime_load_state(runtime, saved_state,
-                                             saved_state_size) == 0);
-                free(saved_state);
-                saved_state = NULL;
+            p8p_cart_destroy(&all_cart);
+        }
+
+        {
+            /* menuitem(): slots 1-5, removal, the button filter in bits 8-15,
+             * O/X closing unless the callback returns true, and errors. */
+            static const char menu_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "s=0 last=-1\n"
+                "function _init()\n"
+                "menuitem(1,\"Music: on\",function(b) last=b if b&3>0 then s+=1 return true end menuitem(1,\"Music: off\") end)\n"
+                "menuitem(2,\"gone\") menuitem(2)\n"
+                "menuitem(3|0x100,\"left \x8e/\x97\",function(b) last=b end)\n"
+                "menuitem(4,\"err\",function() error(\"boom\") end)\n"
+                "menuitem(9,\"bad\")\n"
+                "end\n"
+                "function _draw() cls() pset(0,0,s) if last==112 then pset(1,0,7) end end\n";
+            p8p_cart_t menu_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)menu_source,
+                                            sizeof(menu_source) - 1,
+                                            &menu_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &menu_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            const char *label = p8p_runtime_menu_item(runtime, 1);
+            CHECK(label && strcmp(label, "Music: on") == 0);
+            CHECK(p8p_runtime_menu_item(runtime, 2) == NULL);
+            label = p8p_runtime_menu_item(runtime, 3);
+            CHECK(label && strcmp(label, "left O/X") == 0);
+            CHECK(p8p_runtime_menu_item(runtime, 0) == NULL);
+            CHECK(p8p_runtime_menu_item(runtime, 6) == NULL);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 2) == 1);
+            CHECK(p8p_runtime_menu_select(runtime, 3, 2) == 1);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 112) == 0);
+            /* Relabelling from the callback keeps the callback. */
+            label = p8p_runtime_menu_item(runtime, 1);
+            CHECK(label && strcmp(label, "Music: off") == 0);
+            CHECK(p8p_runtime_menu_select(runtime, 1, 2) == 1);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 2);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
+            CHECK(p8p_runtime_menu_select(runtime, 4, 112) == -1);
+            CHECK(strstr(p8p_runtime_error(runtime), "boom") != NULL);
+
+            /* The system menu lists cart entries after RESUME: right on
+             * entry 1 keeps the menu open, A on it closes the menu. */
+            CHECK(p8p_runtime_load(runtime, &menu_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            /* The menu reads state slots ("save:N") from the working
+             * directory; keep them out of the source tree. */
+            char menu_dir[] = "/tmp/pico8pocket-menu-XXXXXX";
+            char previous_dir[1024];
+            CHECK(getcwd(previous_dir, sizeof(previous_dir)) != NULL);
+            CHECK(mkdtemp(menu_dir) != NULL && chdir(menu_dir) == 0);
+            p8p_settings_t menu_settings;
+            p8p_cart_hash_t menu_hash = {};
+            p8p_settings_defaults(&menu_settings);
+            p8p_menu_t *menu = p8p_menu_create(&menu_settings, &menu_hash, "P8");
+            CHECK(menu != NULL);
+            p8p_menu_open(menu, runtime, 0, 1);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN) == P8P_MENU_NONE);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_RIGHT) == P8P_MENU_NONE);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_CLOSE);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 1);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            /* Entry 4 raises an error: two rows below entry 1. */
+            p8p_menu_open(menu, runtime, 0, 1);
+            for (int i = 0; i < 3; ++i)
+                p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_CART_ERROR);
+            /* After a runtime error the cart entries are hidden. */
+            p8p_menu_open(menu, runtime, 0, 0);
+            p8p_menu_update(menu, runtime, 0, P8P_PHYS_DOWN);
+            CHECK(p8p_menu_update(menu, runtime, 0, P8P_PHYS_A) == P8P_MENU_NONE);
+            p8p_menu_destroy(menu);
+            p8p_cart_destroy(&menu_cart);
+            unlink("save:0");
+            CHECK(chdir(previous_dir) == 0);
+            rmdir(menu_dir);
+        }
+
+        {
+            static const char *const celeste_paths[] = {
+                "assets/cards/celeste.p8.png",
+                "assets/cards/celeste_classic_2.p8.png",
+            };
+            int found = 0;
+            for (size_t i = 0; i < sizeof(celeste_paths) / sizeof(celeste_paths[0]); ++i) {
+                p8p_cart_t celeste_cart = {};
+                if (p8p_cart_load_file(celeste_paths[i], &celeste_cart) != 0)
+                    continue;
+                ++found;
+                CHECK(celeste_cart.lua_size > 20000);
+                celeste_acceptance(runtime, celeste_paths[i], &celeste_cart);
+                p8p_cart_destroy(&celeste_cart);
             }
-        } else {
-            puts("Celeste acceptance test skipped (local cart not present)");
+            if (!found)
+                puts("Celeste acceptance test skipped (no local cart in assets/cards)");
         }
 
         p8p_runtime_destroy(runtime);
@@ -730,7 +948,6 @@ int main(void) {
     p8p_cart_destroy(&cart);
     p8p_cart_destroy(&png_cart);
     p8p_cart_destroy(&legacy_cart);
-    p8p_cart_destroy(&celeste_cart);
     p8p_cart_destroy(&flip_cart);
     p8p_cart_destroy(&glyph_cart);
     p8p_cart_destroy(&nested_short_if_cart);

@@ -1,0 +1,86 @@
+Check the count hook at servicepoints instead of every instruction.
+
+The runtime always installs a count hook (audio/input service during long
+frames and the runaway-loop guard), so every instruction paid a load,
+decrement, store and two branches on RV32.  The prologue now only checks
+for line hooks; OP_JMP, taken conditional branches, OP_FORLOOP,
+OP_TFORLOOP, OP_CALL and OP_TAILCALL decrement the count before doing
+anything, so a yielding hook still re-runs the instruction on resume.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -606,8 +606,20 @@
+     if (a > 0) luaF_close(L, ci->u.l.base + a - 1); \
+     ci->u.l.savedpc += GETARG_sBx(i) + e; }
+ 
++/*
++** Pico8Pocket: the count hook (the runtime's audio/input service and its
++** runaway-loop guard) counts servicepoints -- jumps, loop back-edges and
++** calls -- instead of instructions, so straight-line code no longer pays a
++** decrement on every instruction.  Every loop and recursion passes one.
++** Placed before the instruction does anything, so a yielding hook re-runs
++** it on resume exactly as the per-instruction check did.
++*/
++#define servicepoint() \
++  { if ((L->hookmask & LUA_MASKCOUNT) && --L->hookcount == 0) { \
++      Protect(traceexec(L)); ra = RA(i); } }
++
+ /* for test instructions, execute the jump instruction that follows it */
+-#define donextjump(ci)	{ i = *ci->u.l.savedpc; dojump(ci, i, 1); }
++#define donextjump(ci)	{ servicepoint(); i = *ci->u.l.savedpc; dojump(ci, i, 1); }
+ 
+ 
+ #define Protect(x)	{ {x;}; base = ci->u.l.base; }
+@@ -656,8 +668,9 @@
+   for (;;) {
+     Instruction i = *(ci->u.l.savedpc++);
+     StkId ra;
+-    if ((L->hookmask & (LUA_MASKLINE | LUA_MASKCOUNT)) &&
+-        (--L->hookcount == 0 || L->hookmask & LUA_MASKLINE)) {
++    /* Pico8Pocket: count hooks are checked at servicepoints (jumps, loop
++       back-edges and calls), not on every instruction; see servicepoint. */
++    if (L->hookmask & LUA_MASKLINE) {
+       Protect(traceexec(L));
+     }
+     /* WARNING: several calls may realloc the stack and invalidate `ra' */
+@@ -856,6 +869,7 @@
+         L->top = ci->top;  /* restore top */
+       )
+       vmcase(OP_JMP,
++        servicepoint();
+         dojump(ci, i, 0);
+       )
+       vmcase(OP_EQ,
+@@ -914,6 +928,7 @@
+         }
+       )
+       vmcase(OP_CALL,
++        servicepoint();
+         int b = GETARG_B(i);
+         int nresults = GETARG_C(i) - 1;
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+@@ -934,6 +949,7 @@
+         }
+       )
+       vmcase(OP_TAILCALL,
++        servicepoint();
+         int b = GETARG_B(i);
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+         lua_assert(GETARG_C(i) - 1 == LUA_MULTRET);
+@@ -978,6 +994,7 @@
+         }
+       )
+       vmcase(OP_FORLOOP,
++        servicepoint();
+         lua_Number step = nvalue(ra+2);
+         lua_Number idx = luai_numadd(L, (lua_Number)nvalue(ra), step); /* increment index */
+         lua_Number limit = nvalue(ra+1);
+@@ -1018,6 +1035,7 @@
+         goto l_tforloop;
+       )
+       vmcase(OP_TFORLOOP,
++        servicepoint();
+         l_tforloop:
+         if (!ttisnil(ra + 1)) {  /* continue loop? */
+           setobjs2s(L, ra, ra + 1);  /* save control variable */

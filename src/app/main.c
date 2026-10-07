@@ -64,7 +64,7 @@ static void draw_profile(uint8_t *fb, unsigned logical_fps,
                          unsigned visible_fps, unsigned update_us,
                          unsigned draw_us, unsigned audio_us,
                          unsigned present_us, unsigned render_divisor,
-                         unsigned lua_instructions,
+                         unsigned lua_instructions, unsigned full_us,
                          const p8p_runtime_api_profile_t *apis) {
     draw_metric(fb, 0, 0,  'L', 7,  logical_fps, 2);
     draw_metric(fb, 0, 7,  'V', 6,  visible_fps, 2);
@@ -74,6 +74,10 @@ static void draw_profile(uint8_t *fb, unsigned logical_fps,
     draw_metric(fb, 0, 35, 'P', 12, (present_us + 500) / 1000, 2);
     draw_metric(fb, 0, 42, 'R', 14, render_divisor, 2);
     draw_metric(fb, 0, 49, 'K', 10, (lua_instructions + 500) / 1000, 3);
+    /* The whole runtime step the frame-skip scheduler times: update and
+     * draw plus audio serviced mid-frame, GC and frame setup.  It keeps
+     * R1 while F + A + P fits the budget (30 ms at 30 fps). */
+    draw_metric(fb, 0, 56, 'F', 13, (full_us + 500) / 1000, 2);
     if (apis) {
         draw_metric(fb, 18, 0,  'S', 12, apis->calls[P8P_API_SPRITE], 3);
         draw_metric(fb, 18, 7,  'G', 8,  apis->calls[P8P_API_GRAPHICS], 3);
@@ -335,6 +339,7 @@ int main(int argc, char **argv) {
     int diagnostics_visible = 0;
     int render_divisor = 1;
     int render_phase = 0;
+    int probe_frames = 0;
     int overload_frames = 0;
     int recovery_frames = 0;
     char runtime_error[256] = {0};
@@ -448,7 +453,7 @@ int main(int argc, char **argv) {
             menu_open = 1;
             menu_opened_this_frame = 1;
             p8p_platform_audio_set_paused(1);
-            p8p_menu_open(menu, runtime, physical);
+            p8p_menu_open(menu, runtime, physical, running);
         }
 
         const p8p_control_profile_t *controls =
@@ -485,6 +490,7 @@ int main(int argc, char **argv) {
                     runtime_failed = 0;
                     runtime_error[0] = '\0';
                     render_divisor = 1;
+                    probe_frames = 0;
                     render_phase = 0;
                     overload_frames = 0;
                     recovery_frames = 0;
@@ -505,6 +511,16 @@ int main(int argc, char **argv) {
                 p8p_platform_audio_set_paused(0);
             } else if (action == P8P_MENU_EXIT) {
                 p8p_platform_exit();
+            } else if (action == P8P_MENU_CART_ERROR) {
+                printf("pico8pocket: runtime error: %s\n",
+                       p8p_runtime_error(runtime));
+                running = 0;
+                runtime_failed = 1;
+                snprintf(runtime_error, sizeof(runtime_error), "%s",
+                         p8p_runtime_error(runtime));
+                menu_open = 0;
+                suppress_buttons = physical;
+                p8p_platform_audio_set_paused(0);
             }
         } else if (menu_open && (running || runtime_failed)) {
             present_framebuffer = p8p_menu_framebuffer(menu);
@@ -517,8 +533,19 @@ int main(int argc, char **argv) {
                 drew_game_frame = render_phase == 0;
                 render_phase = (render_phase + 1) % render_divisor;
             } else {
+                uint32_t period_us = target_fps == 30 ? 33333u : 16667u;
                 drew_game_frame = 1;
                 render_phase = 0;
+                /* Update-only cost is measured only on frames that skip
+                 * drawing.  A spike (Kiloman loads a room inside _update)
+                 * can push the estimate high enough to select divisor 1,
+                 * which then never measures it again.  While still over
+                 * budget, skip one draw in 15 to refresh it. */
+                if (average_draw_runtime_us > period_us &&
+                    ++probe_frames >= 15) {
+                    probe_frames = 0;
+                    drew_game_frame = 0;
+                }
             }
             if (p8p_runtime_step_with_draw(runtime, buttons,
                                            drew_game_frame) != 0) {
@@ -539,6 +566,11 @@ int main(int argc, char **argv) {
             if (drew_game_frame)
                 average_draw_runtime_us = smooth_time(
                     average_draw_runtime_us, runtime_us);
+            else if (render_divisor == 1 &&
+                     runtime_us < average_update_runtime_us)
+                /* A probe: let a stale spike decay quickly. */
+                average_update_runtime_us =
+                    (average_update_runtime_us + runtime_us) / 2u;
             else
                 average_update_runtime_us = smooth_time(
                     average_update_runtime_us, runtime_us);
@@ -625,7 +657,7 @@ int main(int argc, char **argv) {
                          runtime_profile.average_draw_us,
                          average_audio_us, average_present_us,
                          (unsigned)render_divisor, average_instructions,
-                         &api_profile);
+                         average_draw_runtime_us, &api_profile);
         }
         if (running) {
             uint32_t audio_start_us = p8p_platform_time_us();

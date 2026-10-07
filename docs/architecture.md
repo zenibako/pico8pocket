@@ -125,7 +125,7 @@ a core at 32 slots.
 
 Therefore the complete browser uses a two-part design:
 
-1. Cards live under `/Assets/pico8pocket/common/cards/` and can initially be
+1. Cards live under `/Assets/pico8/common/cards/` and can initially be
    selected with Pocket's native asset picker.
 2. A compact `cards.idx` catalog supplies paths, metadata, favorites, recent
    entries and ZIP members to the in-core browser. A host-side indexer updates
@@ -145,14 +145,15 @@ would require a new Pocket firmware API from Analogue.
    graphics, input, map, palette, memory and utility API slice.
 3. **Implemented in alpha:** `.p8.png` decode, legacy/current compressed code,
    plus a 120-frame headless Celeste test.
-4. **Implemented in alpha:** integer/fixed-point 48 kHz SFX/music synthesis,
+4. **Implemented in alpha:** integer/fixed-point SFX/music synthesis (24 kHz, interpolated to 48 kHz),
    built-in waveforms, music sequencing and standard note effects.
 5. **Implemented in alpha:** paused system menu, content-keyed compressed save
    states with previews, English/Russian UI, per-cart controls, audio/display
    settings and native AnalogueOS cartridge reload.
 6. **Implemented in alpha:** cooperative `flip`, extended drawing/memory APIs,
    draw-state aliases, remappable big maps and persistent `cartdata`.
-7. **Next:** custom instruments/audio filters, PICO pause menu, multicart
-   `load`, and physical-Pocket timing/scaler validation.
+7. **Implemented:** custom SFX instruments and filters; cartridge
+   `menuitem()` entries in the system menu.
+   **Next:** multicart `load` and physical-Pocket timing/scaler validation.
 8. Browser/indexer, ZIP, cart previews, favorites and recent entries.
 9. PICO-8 v0.2.7 conformance matrix.

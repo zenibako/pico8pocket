@@ -6,6 +6,11 @@
 #include <lualib.h>
 #include <lauxlib.h>
 #include <fix32.h>
+/* Lua internals for the all() iterator's direct table access. */
+#include <lstate.h>
+#include <lgc.h>
+#include <ltable.h>
+#include <lvm.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -32,8 +37,9 @@ struct p8p_runtime {
     uint8_t cart_rom[P8P_CART_ROM_SIZE];
     /* One byte per logical pixel is the fast drawing surface.  PICO-8's
      * packed 4-bpp screen RAM is synchronized only when a memory API touches
-     * it, avoiding a read-modify-write for every rendered pixel. */
-    uint8_t framebuffer[128 * 128];
+     * it, avoiding a read-modify-write for every rendered pixel.  Word
+     * aligned so fill patterns can write four pixels at a time. */
+    alignas(4) uint8_t framebuffer[128 * 128];
     uint8_t screen_ram_dirty;
     /* RAM address the framebuffer mirrors: the screen at 0x6000 unless the
      * cart redirects drawing with 0x5f55 (e.g. into the sprite sheet). */
@@ -76,6 +82,11 @@ struct p8p_runtime {
     uint8_t cart_thread_active;
     uint8_t cart_thread_kind;
     uint8_t restart_requested;
+    /* menuitem() entries 1-5: label ("" when empty), button filter from
+     * bits 8-15 of the index, and a registry table of callbacks. */
+    char menu_labels[5][17];
+    uint8_t menu_filters[5];
+    int menu_ref;
     p8p_runtime_service_fn service_hook;
     void *service_userdata;
     p8p_runtime_profile_fn profile_hook;
@@ -181,39 +192,63 @@ static void runtime_service_lua_hook(lua_State *lua, lua_Debug *) {
         lua_yield(lua, 0);
 }
 
+/* The count hook counts servicepoints (jumps, loop back-edges and calls;
+ * patches/z8lua-servicepoints.patch), about one per four instructions:
+ * 2048 keeps the previous every-8192-instructions service rate (measured
+ * on Moss Moss, Kiloman and Celeste 2). */
 static void install_service_hook(p8p_runtime_t *runtime) {
     if (!runtime || !runtime->lua)
         return;
     if (runtime->service_hook)
         lua_sethook(runtime->lua, runtime_service_lua_hook,
-                    LUA_MASKCOUNT, 8192);
+                    LUA_MASKCOUNT, 2048);
     else
         lua_sethook(runtime->lua, NULL, 0, 0);
     if (runtime->cart_thread)
         lua_sethook(runtime->cart_thread, runtime_service_lua_hook,
-                    LUA_MASKCOUNT, 8192);
+                    LUA_MASKCOUNT, 2048);
+}
+
+/* Arguments are read straight from the C function's stack frame: about
+ * 1,900 Lua -> API calls a frame in carts like Celeste made the generic
+ * lua_gettop/lua_type/lua_tonumberx calls a measurable cost. */
+static inline int arg_count(lua_State *lua) {
+    return (int)(lua->top - (lua->ci->func + 1));
+}
+
+static inline const TValue *arg_value(lua_State *lua, int index) {
+    StkId slot = lua->ci->func + index;
+    return slot < lua->top ? slot : NULL;
 }
 
 static int32_t arg_int(lua_State *lua, int index, int32_t fallback) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return fallback;
+    if (ttisnumber(value))
+        return (int32_t)nvalue(value);
     return (int32_t)lua_tonumber(lua, index);
 }
 
 /* A colour argument to a drawing call also becomes the pen colour, as in
  * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
 static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return runtime->draw_color;
-    int32_t color = (int32_t)lua_tonumber(lua, index);
+    int32_t color = ttisnumber(value) ? (int32_t)nvalue(value) :
+                                        (int32_t)lua_tonumber(lua, index);
     runtime->draw_color = color & 255;
     runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
     return color;
 }
 
 static fix32 arg_number(lua_State *lua, int index, fix32 fallback) {
-    if (lua_gettop(lua) < index || lua_isnil(lua, index))
+    const TValue *value = arg_value(lua, index);
+    if (!value || ttisnil(value))
         return fallback;
+    if (ttisnumber(value))
+        return nvalue(value);
     return lua_tonumber(lua, index);
 }
 
@@ -317,8 +352,11 @@ static int lua_pool_panic(lua_State *lua) {
     return 0;
 }
 
-static void push_int(lua_State *lua, int32_t value) {
-    lua_pushnumber(lua, fix32(value));
+/* What lua_pushnumber does for a fix32, without the call.  C functions
+ * have LUA_MINSTACK free slots; larger pushes reserve them first. */
+static inline void push_int(lua_State *lua, int32_t value) {
+    setnvalue(lua->top, fix32(value));
+    ++lua->top;
 }
 
 static int in_clip(const p8p_runtime_t *runtime, int x, int y) {
@@ -722,6 +760,76 @@ static void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
     }
 }
 
+/* Fill patterns on screen coordinates already clipped to the clip rectangle.
+ * Same result as screen_set() per pixel: a set pattern bit selects the high
+ * nibble of the colour, or leaves the pixel alone when the pattern is
+ * transparent.  Byte k of fill/keep is the pixel at x % 4 == k
+ * (little-endian words); keep marks the pixels left alone.  Kept out of
+ * BRAM; Celeste 2 fills its background columns and fog this way. */
+struct pattern_row {
+    uint32_t fill;
+    uint32_t keep;
+};
+
+static pattern_row fill_pattern_row(const p8p_runtime_t *runtime, int y,
+                                    int color) {
+    unsigned row = (runtime->fill_pattern >> (12 - 4 * (y & 3))) & 15u;
+    uint8_t clear = runtime->draw_palette[color & 15] & 15;
+    uint8_t set = runtime->draw_palette[(color >> 4) & 15] & 15;
+    pattern_row result = {0, 0};
+    for (int k = 0; k < 4; ++k) {
+        int pattern_bit = (row >> (3 - k)) & 1u;
+        if (pattern_bit && runtime->fill_pattern_transparent)
+            result.keep |= 0xffu << (8 * k);
+        else
+            result.fill |= (uint32_t)(pattern_bit ? set : clear) << (8 * k);
+    }
+    return result;
+}
+
+static inline void fill_pattern_span(uint8_t *row_pixels, int x0, int x1,
+                                     pattern_row pattern) {
+    int x = x0;
+    for (; x <= x1 && (x & 3); ++x)
+        if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
+            row_pixels[x] = (uint8_t)(pattern.fill >> (8 * (x & 3)));
+    uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels, 4);
+    if (pattern.keep) {
+        for (; x + 3 <= x1; x += 4) {
+            uint32_t word;
+            memcpy(&word, aligned + x, 4);
+            word = (word & pattern.keep) | pattern.fill;
+            memcpy(aligned + x, &word, 4);
+        }
+    } else {
+        for (; x + 3 <= x1; x += 4)
+            memcpy(aligned + x, &pattern.fill, 4);
+    }
+    for (; x <= x1; ++x)
+        if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
+            row_pixels[x] = (uint8_t)(pattern.fill >> (8 * (x & 3)));
+}
+
+static void __attribute__((noinline)) draw_hspan_pattern(
+        p8p_runtime_t *runtime, int x0, int x1, int y, int color) {
+    fill_pattern_span(runtime->framebuffer + y * 128, x0, x1,
+                      fill_pattern_row(runtime, y, color));
+    runtime->screen_ram_dirty = 1;
+}
+
+/* rectfill() with a fill pattern: the pattern repeats every four rows, so
+ * work them out once instead of per row. */
+static void __attribute__((noinline)) draw_rect_pattern(
+        p8p_runtime_t *runtime, int x0, int x1, int y0, int y1, int color) {
+    pattern_row rows[4];
+    for (int k = 0; k < 4; ++k)
+        rows[(y0 + k) & 3] = fill_pattern_row(runtime, y0 + k, color);
+    for (int y = y0; y <= y1; ++y)
+        fill_pattern_span(runtime->framebuffer + y * 128, x0, x1,
+                          rows[y & 3]);
+    runtime->screen_ram_dirty = 1;
+}
+
 static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
                                     int y, int color) {
     x0 -= runtime->camera_x;
@@ -744,9 +852,7 @@ static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
                (size_t)(x1 - x0 + 1));
         runtime->screen_ram_dirty = 1;
     } else {
-        for (int screen_x = x0; screen_x <= x1; ++screen_x)
-            screen_set(runtime, screen_x + runtime->camera_x,
-                       y + runtime->camera_y, color);
+        draw_hspan_pattern(runtime, x0, x1, y, color);
     }
 }
 
@@ -795,7 +901,7 @@ static int api_sset(lua_State *lua) {
 static int api_color(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     int previous = active_runtime->draw_color;
-    if (lua_gettop(lua) >= 1)
+    if (arg_count(lua) >= 1)
         active_runtime->draw_color = arg_int(lua, 1, 6) & 255;
     active_runtime->ram[0x5f25] = (uint8_t)active_runtime->draw_color;
     push_int(lua, previous);
@@ -834,6 +940,24 @@ static int api_rectfill(lua_State *lua) {
     if (y1 > visible_y1) y1 = visible_y1;
     if (y0 > y1)
         return 0;
+    if (runtime->fill_pattern) {
+        /* Same clipping as draw_hspan(), done once for every row. */
+        int screen_x0 = x0 - runtime->camera_x;
+        int screen_x1 = x1 - runtime->camera_x;
+        if (screen_x0 > screen_x1) {
+            int temporary = screen_x0;
+            screen_x0 = screen_x1;
+            screen_x1 = temporary;
+        }
+        if (screen_x0 < runtime->clip_x0) screen_x0 = runtime->clip_x0;
+        if (screen_x1 >= runtime->clip_x1) screen_x1 = runtime->clip_x1 - 1;
+        if (screen_x0 > screen_x1)
+            return 0;
+        draw_rect_pattern(runtime, screen_x0, screen_x1,
+                          y0 - runtime->camera_y, y1 - runtime->camera_y,
+                          color);
+        return 0;
+    }
     for (int y = y0; y <= y1; ++y)
         draw_hspan(runtime, x0, x1, y, color);
     return 0;
@@ -1142,13 +1266,14 @@ static int api_mset(lua_State *lua) {
 
 static int api_fget(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int sprite = (int32_t)lua_tonumber(lua, 1) & 255;
+    int sprite = arg_int(lua, 1, 0) & 255;
     uint8_t flags = active_runtime->ram[0x3000 + sprite];
-    if (lua_gettop(lua) < 2) {
+    if (arg_count(lua) < 2) {
         push_int(lua, flags);
     } else {
-        int flag = (int32_t)lua_tonumber(lua, 2) & 7;
-        lua_pushboolean(lua, (flags & (1u << flag)) != 0);
+        int flag = arg_int(lua, 2, 0) & 7;
+        setbvalue(lua->top, (flags & (1u << flag)) != 0);
+        ++lua->top;
     }
     return 1;
 }
@@ -1156,7 +1281,7 @@ static int api_fget(lua_State *lua) {
 static int api_fset(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int sprite = arg_int(lua, 1, 0) & 255;
-    if (lua_gettop(lua) < 3) {
+    if (arg_count(lua) < 3) {
         active_runtime->ram[0x3000 + sprite] = (uint8_t)arg_int(lua, 2, 0);
     } else {
         int flag = arg_int(lua, 2, 0) & 7;
@@ -1301,7 +1426,7 @@ static int api_clip(lua_State *lua) {
     int old_x1 = runtime->clip_x1;
     int old_y0 = runtime->clip_y0;
     int old_y1 = runtime->clip_y1;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         runtime->clip_x0 = runtime->clip_y0 = 0;
         runtime->clip_x1 = runtime->clip_y1 = 128;
     } else {
@@ -1339,7 +1464,7 @@ static void reset_transparency(p8p_runtime_t *runtime) {
 static int api_pal(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         /* Like PICO-8, pal() also resets transparency to palt(). */
         if (!runtime->palettes_default) {
             for (int i = 0; i < 16; ++i) {
@@ -1391,9 +1516,9 @@ static int api_pal(lua_State *lua) {
 static int api_palt(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         reset_transparency(runtime);
-    } else if (lua_gettop(lua) == 1) {
+    } else if (arg_count(lua) == 1) {
         /* palt(bitfield): bit 15-i makes colour i transparent. */
         int bits = arg_int(lua, 1, 0) & 0xffff;
         for (int color = 0; color < 16; ++color) {
@@ -1406,7 +1531,7 @@ static int api_palt(lua_State *lua) {
     } else {
         int color = arg_int(lua, 1, 0) & 15;
         uint8_t transparent =
-            (uint8_t)(lua_gettop(lua) < 2 || lua_toboolean(lua, 2));
+            (uint8_t)(arg_count(lua) < 2 || lua_toboolean(lua, 2));
         if (runtime->transparent[color] != transparent) {
             runtime->transparent[color] = transparent;
             runtime->transparency_default = 0;
@@ -1419,7 +1544,7 @@ static int api_palt(lua_State *lua) {
 
 static int api_btn(lua_State *lua) {
     profile_api(P8P_API_INPUT);
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         push_int(lua, active_runtime->buttons & 0x7f);
     } else {
         int button = arg_int(lua, 1, 0);
@@ -1446,7 +1571,7 @@ static int btnp_fires(const p8p_runtime_t *runtime, uint16_t held) {
 static int api_btnp(lua_State *lua) {
     profile_api(P8P_API_INPUT);
     p8p_runtime_t *runtime = active_runtime;
-    if (lua_gettop(lua) == 0) {
+    if (arg_count(lua) == 0) {
         int mask = 0;
         for (int button = 0; button < 7; ++button)
             if (btnp_fires(runtime, runtime->held_frames[button]))
@@ -1472,7 +1597,7 @@ static int api_peek(lua_State *lua) {
     /* PICO-8 v0.2.5+ raised the multi-value peek limit from 8192. */
     if (count > 32767) count = 32767;
     /* C functions are only guaranteed LUA_MINSTACK free slots. */
-    if (!lua_checkstack(lua, count))
+    if (count > LUA_MINSTACK && !lua_checkstack(lua, count))
         return luaL_error(lua, "peek: stack overflow");
     if (range_touches_screen(address, count))
         screen_to_ram(active_runtime);
@@ -1484,7 +1609,7 @@ static int api_peek(lua_State *lua) {
 static int api_poke(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int address = arg_int(lua, 1, 0) & 0xffff;
-    int values = lua_gettop(lua) - 1;
+    int values = arg_count(lua) - 1;
     if (values < 1)
         values = 1;
     for (int i = 0; i < values; ++i)
@@ -1713,9 +1838,14 @@ static int api_rnd(lua_State *lua) {
 
 static int api_time(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    double seconds = (double)active_runtime->frame_count /
-                     (double)active_runtime->target_fps;
-    lua_pushnumber(lua, fix32(seconds));
+    /* frame_count / fps in 16.16 fixed point, truncated and wrapped exactly
+     * like fix32((double)frame_count / fps) but without the soft-float
+     * divide and conversion (several hundred RV32 instructions per call;
+     * Celeste 2 calls time() for every pixel of its grapple rope). */
+    uint32_t fps = (uint32_t)active_runtime->target_fps;
+    uint32_t frames = active_runtime->frame_count;
+    uint32_t bits = (frames / fps) * 65536u + ((frames % fps) << 16) / fps;
+    lua_pushnumber(lua, fix32::frombits((int32_t)bits));
     return 1;
 }
 
@@ -1723,8 +1853,8 @@ static int api_cursor(lua_State *lua) {
     profile_api(P8P_API_TEXT);
     int old_x = active_runtime->cursor_x;
     int old_y = active_runtime->cursor_y;
-    if (lua_gettop(lua) >= 1) active_runtime->cursor_x = arg_int(lua, 1, old_x);
-    if (lua_gettop(lua) >= 2) active_runtime->cursor_y = arg_int(lua, 2, old_y);
+    if (arg_count(lua) >= 1) active_runtime->cursor_x = arg_int(lua, 1, old_x);
+    if (arg_count(lua) >= 2) active_runtime->cursor_y = arg_int(lua, 2, old_y);
     cursor_to_ram(active_runtime);
     push_int(lua, old_x);
     push_int(lua, old_y);
@@ -1904,7 +2034,7 @@ static int api_print(lua_State *lua) {
     int converted = lua_type(lua, 1) != LUA_TSTRING;
     const uint8_t *text = (const uint8_t *)(converted ?
         luaL_tolstring(lua, 1, &length) : lua_tolstring(lua, 1, &length));
-    int arguments = lua_gettop(lua) - converted;
+    int arguments = arg_count(lua) - converted;
     int x = runtime->cursor_x, y = runtime->cursor_y;
     if (arguments == 2) {
         /* print(str, col) */
@@ -2306,6 +2436,53 @@ static int api_stub(lua_State *lua) {
     return 0;
 }
 
+/* menuitem(index, [label, [callback]]) adds, replaces, relabels (no
+ * callback) or (without a label) removes pause-menu entry 1-5.  Bits 8-15 of index filter which button
+ * presses reach the callback. */
+static int api_menuitem(lua_State *lua) {
+    p8p_runtime_t *runtime = active_runtime;
+    int index = arg_int(lua, 1, 0);
+    int slot = (index & 0xff) - 1;
+    if (slot < 0 || slot >= 5)
+        return 0;
+    if (runtime->menu_ref == LUA_NOREF) {
+        lua_newtable(lua);
+        runtime->menu_ref = luaL_ref(lua, LUA_REGISTRYINDEX);
+    }
+    lua_rawgeti(lua, LUA_REGISTRYINDEX, runtime->menu_ref);
+    if (lua_isstring(lua, 2)) {
+        /* The system menu font is ASCII: button glyphs become letters and
+         * arrows, other P8SCII characters '?'. */
+        size_t length;
+        const unsigned char *label =
+            (const unsigned char *)lua_tolstring(lua, 2, &length);
+        size_t used = 0;
+        for (size_t i = 0; i < length && used < 16; ++i) {
+            unsigned char c = label[i];
+            char out = (c >= 32 && c < 127) ? (char)c :
+                       c == 0x8b ? '<' : c == 0x91 ? '>' : c == 0x94 ? '^' :
+                       c == 0x83 ? 'v' : c == 0x8e ? 'O' : c == 0x97 ? 'X' : '?';
+            runtime->menu_labels[slot][used++] = out;
+        }
+        runtime->menu_labels[slot][used] = '\0';
+        runtime->menu_filters[slot] = (uint8_t)((index >> 8) & 0xff);
+        if (lua_isfunction(lua, 3)) {
+            lua_pushvalue(lua, 3);
+        } else {
+            /* A new label alone keeps the callback, as PICO-8 does: carts
+             * relabel a toggle from inside its own callback. */
+            lua_pop(lua, 1);
+            return 0;
+        }
+    } else {
+        runtime->menu_labels[slot][0] = '\0';
+        lua_pushnil(lua);
+    }
+    lua_rawseti(lua, -2, slot + 1);
+    lua_pop(lua, 1);
+    return 0;
+}
+
 /* trace([message]) returns a stack trace in PICO-8; the Lua debug library
  * is hidden here, so only the message comes back. */
 static int api_trace(lua_State *lua) {
@@ -2336,44 +2513,52 @@ static int api_serial(lua_State *lua) {
     return 1;
 }
 
+/* all(t) iterator; upvalues are the table, the next index and the value
+ * returned last.  If that value is no longer at the index (the cart deleted
+ * it), the index stays, as in PICO-8.  This runs once per loop iteration in
+ * most carts, so it works on the table directly and computes #t only when
+ * the slot is empty. */
 static int api_all_next(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    if (!lua_istable(lua, lua_upvalueindex(1))) {
+    CClosure *closure = clCvalue(lua->ci->func);
+    TValue *table_value = &closure->upvalue[0];
+    TValue *index_value = &closure->upvalue[1];
+    TValue *previous = &closure->upvalue[2];
+    if (!ttistable(table_value)) {
         lua_pushnil(lua);
         return 1;
     }
-    int index = (int)lua_tointeger(lua, lua_upvalueindex(2));
-    lua_rawgeti(lua, lua_upvalueindex(1), index);
-    if (lua_rawequal(lua, -1, lua_upvalueindex(3))) {
-        lua_pop(lua, 1);
-        ++index;
-    } else {
-        lua_pop(lua, 1);
+    Table *table = hvalue(table_value);
+    int index;
+    lua_number2int(index, nvalue(index_value));
+    const TValue *slot = luaH_getint(table, index);
+    /* Items are usually tables, whose raw equality is identity. */
+    if (ttistable(slot) && ttistable(previous) ?
+            hvalue(slot) == hvalue(previous) :
+            luaV_rawequalobj(slot, previous))
+        slot = luaH_getint(table, ++index);
+    if (ttisnil(slot)) {
+        int length = luaH_getn(table);
+        while (index <= length && ttisnil(slot))
+            slot = luaH_getint(table, ++index);
+        if (index > length) {
+            setnvalue(index_value, cast_num(index));
+            setnilvalue(previous);
+            lua_pushnil(lua);
+            return 1;
+        }
     }
-    int length = (int)lua_rawlen(lua, lua_upvalueindex(1));
-    while (index <= length) {
-        lua_rawgeti(lua, lua_upvalueindex(1), index);
-        if (!lua_isnil(lua, -1))
-            break;
-        lua_pop(lua, 1);
-        ++index;
-    }
-    lua_pushinteger(lua, index);
-    lua_replace(lua, lua_upvalueindex(2));
-    if (index > length) {
-        lua_pushnil(lua);
-        lua_replace(lua, lua_upvalueindex(3));
-        lua_pushnil(lua);
-        return 1;
-    }
-    lua_pushvalue(lua, -1);
-    lua_replace(lua, lua_upvalueindex(3));
+    setnvalue(index_value, cast_num(index));
+    setobj(lua, previous, slot);
+    luaC_barrier(lua, closure, slot);
+    setobj2s(lua, lua->top, slot);
+    ++lua->top;
     return 1;
 }
 
 static int api_all(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    if (lua_gettop(lua) >= 1)
+    if (arg_count(lua) >= 1)
         lua_pushvalue(lua, 1);
     else
         lua_pushnil(lua);
@@ -2439,7 +2624,7 @@ static const luaL_Reg runtime_api[] = {
     {"srand", api_srand}, {"time", api_time}, {"t", api_time},
     {"flip", api_flip},
     {"cursor", api_cursor}, {"print", api_print}, {"sfx", api_sfx},
-    {"music", api_music}, {"fillp", api_fillp}, {"menuitem", api_stub},
+    {"music", api_music}, {"fillp", api_fillp}, 
     {"printh", api_stub}, {"extcmd", api_stub}, {"serial", api_serial},
     {"mkdir", api_cooperative_stub}, {"cd", api_stub},
     {"stat", api_stat}, {"run", api_run}, {"all", api_all},
@@ -2448,9 +2633,11 @@ static const luaL_Reg runtime_api[] = {
 
 /* Added after 0.0.33's first save-state format: numbered last by
  * eris.__p8p_init so existing permanent-object IDs do not move. Keep in
- * sync with the list in that function. */
+ * sync with the list in that function.  menuitem used to share api_stub,
+ * which was numbered under "cd", so moving it here keeps the IDs too. */
 static const luaL_Reg late_runtime_api[] = {
-    {"cstore", api_stub}, {"trace", api_trace}, {NULL, NULL}
+    {"cstore", api_stub}, {"trace", api_trace}, {"menuitem", api_menuitem},
+    {NULL, NULL}
 };
 
 static void register_pico8_button_constants(lua_State *lua) {
@@ -2503,7 +2690,7 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local late={'cstore','trace'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local late={'cstore','trace','menuitem'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
     " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"
@@ -2695,6 +2882,9 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->cart_thread = NULL;
     runtime->cart_thread_ref = LUA_NOREF;
     runtime->cart_thread_active = 0;
+    memset(runtime->menu_labels, 0, sizeof(runtime->menu_labels));
+    memset(runtime->menu_filters, 0, sizeof(runtime->menu_filters));
+    runtime->menu_ref = LUA_NOREF;
     memset(runtime->ram, 0, sizeof(runtime->ram));
     memcpy(runtime->cart_rom, cart->rom, sizeof(runtime->cart_rom));
     memcpy(runtime->ram, cart->rom, sizeof(runtime->cart_rom));
@@ -2780,9 +2970,9 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->cart_thread_kind = 0;
     runtime->restart_requested = 0;
     if (!runtime->cart_thread ||
-        luaL_loadbuffer(runtime->cart_thread, runtime->cart_lua,
-                        runtime->cart_lua_size,
-                        "cart.p8") != LUA_OK) {
+        luaL_loadbufferx(runtime->cart_thread, runtime->cart_lua,
+                         runtime->cart_lua_size, "cart.p8",
+                         "t") != LUA_OK) {
         set_thread_error(runtime, "cart", runtime->cart_thread);
         return -4;
     }
@@ -3119,6 +3309,43 @@ extern "C" const uint8_t *p8p_runtime_screen_palette(p8p_runtime_t *runtime) {
 extern "C" void p8p_runtime_audio_render(p8p_runtime_t *runtime,
                                           int16_t *stereo, size_t frames) {
     p8p_audio_render(runtime ? runtime->audio : NULL, stereo, frames);
+}
+
+extern "C" const char *p8p_runtime_menu_item(const p8p_runtime_t *runtime,
+                                              int slot) {
+    if (!runtime || slot < 1 || slot > 5 || !runtime->menu_labels[slot - 1][0])
+        return NULL;
+    return runtime->menu_labels[slot - 1];
+}
+
+extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
+                                        int buttons) {
+    /* O/X select (PICO-8 passes 16|32|64 for them) and close the menu unless
+     * the callback returns true; left/right only notify the callback. */
+    int choose = (buttons & 0x70) != 0;
+    int filter;
+    int keep_open;
+    if (!p8p_runtime_menu_item(runtime, slot) || runtime->menu_ref == LUA_NOREF)
+        return choose ? 0 : 1;
+    filter = runtime->menu_filters[slot - 1];
+    if (filter && !(filter & buttons))
+        return choose ? 0 : 1;
+    active_runtime = runtime;
+    lua_rawgeti(runtime->lua, LUA_REGISTRYINDEX, runtime->menu_ref);
+    lua_rawgeti(runtime->lua, -1, slot);
+    lua_remove(runtime->lua, -2);
+    if (!lua_isfunction(runtime->lua, -1)) {
+        lua_pop(runtime->lua, 1);
+        return choose ? 0 : 1;
+    }
+    push_int(runtime->lua, buttons);
+    if (lua_pcall(runtime->lua, 1, 1, 0) != LUA_OK) {
+        set_error(runtime, "menu item");
+        return -1;
+    }
+    keep_open = !choose || lua_toboolean(runtime->lua, -1);
+    lua_pop(runtime->lua, 1);
+    return keep_open;
 }
 
 extern "C" int p8p_runtime_target_fps(const p8p_runtime_t *runtime) {

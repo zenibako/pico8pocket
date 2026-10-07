@@ -66,6 +66,13 @@ int p8p_runtime_save_state(p8p_runtime_t *runtime, void **data, size_t *size);
 int p8p_runtime_load_state(p8p_runtime_t *runtime, const void *data,
                            size_t size);
 int p8p_runtime_target_fps(const p8p_runtime_t *runtime);
+/* Pause-menu entries added by the cart with menuitem(), slots 1-5.  Returns
+ * NULL for an empty slot.  The label is printable ASCII, at most 16 chars. */
+const char *p8p_runtime_menu_item(const p8p_runtime_t *runtime, int slot);
+/* Runs a menu entry's callback with PICO-8's button bitfield (1 left,
+ * 2 right, 112 for O/X).  Returns 1 to keep the menu open, 0 to close it,
+ * or -1 if the callback raised an error (see p8p_runtime_error). */
+int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot, int buttons);
 const char *p8p_runtime_error(const p8p_runtime_t *runtime);
 #ifdef P8P_RUNTIME_DEBUG
 int p8p_runtime_debug_eval_int(p8p_runtime_t *runtime,

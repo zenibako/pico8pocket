@@ -1,0 +1,62 @@
+Follow __index tables in the interpreter loop for missed global names.
+
+Carts that use objects as _ENV (local _ENV=obj, as in Moss Moss) look
+many names up through a metatable whose __index is the globals; each such
+read left the fast path for luaV_gettable.  After a fastslot miss of a
+name looked up through _ENV (bit 8 of B, from the env-fallback patch),
+fastchain walks up to four __index tables and returns only hits; misses,
+__index functions and field reads still take luaV_gettable and the
+sandbox fallback.  fastchain is out of line and outside BRAM.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -172,6 +172,32 @@
+ }
+ 
+ 
++/*
++** After a miss of a name looked up through _ENV (the parser marks these
++** with bit 8 of B), follow __index tables -- objects used as _ENV that fall
++** back to the globals -- without leaving the loop.  Field reads (a.b,
++** a:b()) are left alone: carts like Celeste 2 use __index functions there,
++** and probing them first only costs time.  Only short-string keys, where a fastslot miss means the key is
++** absent, and only hits are returned: misses, __index functions and other
++** types return NULL and take luaV_gettable (and the sandbox fallback) as
++** before.  Kept out of line so the direct-hit path is unchanged.
++*/
++static LUAI_VM_HOT __attribute__((noinline))
++const TValue *fastchain (lua_State *L, const TValue *t, const TValue *key) {
++  int loop;
++  if (!ttisshrstring(key)) return NULL;
++  for (loop = 0; loop < 4 && ttistable(t); loop++) {
++    const TValue *tm = fasttm(L, hvalue(t)->metatable, TM_INDEX);
++    const TValue *res;
++    if (tm == NULL || !ttistable(tm)) return NULL;
++    res = luaH_getstr(hvalue(tm), rawtsvalue(key));
++    if (!ttisnil(res)) return res;
++    t = tm;
++  }
++  return NULL;
++}
++
++
+ static inline int fastset (lua_State *L, const TValue *t, const TValue *key,
+                            const TValue *val) {
+   TValue *slot = fastslot(t, key);
+@@ -670,6 +696,7 @@
+         int encoded = GETARG_B(i);
+         int b = encoded & 0xff;
+         const TValue *fast = fastslot(cl->upvals[b]->v, RKC(i));
++        if (!fast && (encoded & (1 << 8))) fast = fastchain(L, cl->upvals[b]->v, RKC(i));
+         if (fast) { setobj2s(L, ra, fast); break; }
+         Protect(luaV_gettable(L, cl->upvals[b]->v, RKC(i), ra));
+         // ATTN: I don't think this is actually what PICO-8 does, but I'm not sure
+@@ -696,6 +723,7 @@
+         int encoded = GETARG_B(i);
+         TValue *table = base + (encoded & 0xff);
+         const TValue *fast = fastslot(table, RKC(i));
++        if (!fast && (encoded & (1 << 8))) fast = fastchain(L, table, RKC(i));
+         if (fast) { setobj2s(L, ra, fast); break; }
+         Protect(luaV_gettable(L, table, RKC(i), ra));
+         // When _ENV is overridden (e.g., in a for loop), lookups use OP_GETTABLE instead of OP_GETTABUP

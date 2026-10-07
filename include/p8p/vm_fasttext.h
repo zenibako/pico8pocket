@@ -26,15 +26,18 @@ OF_FASTTEXT void luaD_call(struct lua_State *lua, struct lua_TValue *function,
                            int result_count, int allow_yield);
 OF_FASTTEXT int luaD_poscall(struct lua_State *lua,
                              struct lua_TValue *first_result);
+OF_FASTTEXT void luaD_callcfast(struct lua_State *lua,
+                                struct lua_TValue *function, int result_count);
 /* luaV_gettable/luaV_settable are now only the slow path behind the inline
  * table fast path (patches/z8lua-vm-fastpath.patch); their BRAM goes to the
  * larger luaV_execute instead. */
-OF_FASTTEXT int luaV_equalobj_(struct lua_State *lua,
-                               const struct lua_TValue *left,
-                               const struct lua_TValue *right);
-OF_FASTTEXT int luaV_lessthan(struct lua_State *lua,
-                              const struct lua_TValue *left,
-                              const struct lua_TValue *right);
+/* luaV_equalobj_ now only handles tables, userdata and long strings: OP_EQ
+ * compares numbers, nil, booleans and short strings inline
+ * (patches/z8lua-eq-fastpath.patch), so its BRAM went to the __index chain
+ * call sites. */
+/* luaV_lessthan is only the slow path now that OP_LT/OP_LE compare numbers
+ * inline (patches/z8lua-vm-tuning.patch); fastchain and the icache miss
+ * path also live in SDRAM, leaving BRAM to the dispatch loop. */
 OF_FASTTEXT const struct lua_TValue *luaV_tonumber(
     const struct lua_TValue *object, struct lua_TValue *number);
 OF_FASTTEXT const struct lua_TValue *luaH_get(

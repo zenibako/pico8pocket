@@ -17,15 +17,18 @@ enum p8p_menu_action {
     P8P_MENU_CLOSE,
     P8P_MENU_RESTART,
     P8P_MENU_TOGGLE_DIAGNOSTICS,
-    P8P_MENU_EXIT
+    P8P_MENU_EXIT,
+    /* A cart menuitem() callback raised an error; see p8p_runtime_error. */
+    P8P_MENU_CART_ERROR
 };
 
 p8p_menu_t *p8p_menu_create(p8p_settings_t *settings,
                             const p8p_cart_hash_t *cart_hash,
                             const char *cart_kind);
 void p8p_menu_destroy(p8p_menu_t *menu);
+/* cart_running: show the cart's menuitem() entries (not after an error). */
 void p8p_menu_open(p8p_menu_t *menu, p8p_runtime_t *runtime,
-                   uint16_t physical_buttons);
+                   uint16_t physical_buttons, int cart_running);
 enum p8p_menu_action p8p_menu_update(p8p_menu_t *menu,
                                      p8p_runtime_t *runtime,
                                      uint16_t physical_buttons,

@@ -218,6 +218,7 @@ int p8p_state_save_file(const char *path, const p8p_cart_hash_t *cart_hash,
     uint32_t used;
     uint32_t record_size;
     uint64_t sequence;
+    unsigned char *compressed = NULL;
     int result;
 
     if (!path || !cart_hash || !runtime)
@@ -231,8 +232,22 @@ int p8p_state_save_file(const char *path, const p8p_cart_hash_t *cart_hash,
     }
     if (find_record(store, cart_hash, RECORD_TYPE_STATE, &offset, &old_size))
         remove_record(store, offset, old_size);
+    /* Compress first and check the real size: the worst-case bound of a
+     * large state (Moss Moss's Lua heap makes ~500 KB raw) exceeds the
+     * slot even though it compresses to a fraction of that. */
     compressed_size = mz_compressBound(raw_size);
-    if (compressed_size > STORE_CAPACITY) {
+    compressed = (unsigned char *)malloc((size_t)compressed_size);
+    if (!compressed) {
+        result = -4;
+        goto done;
+    }
+    if (mz_compress2(compressed, &compressed_size, (const unsigned char *)raw,
+                     raw_size, MZ_BEST_SPEED) != MZ_OK) {
+        result = -6;
+        goto done;
+    }
+    if (compressed_size > STORE_CAPACITY - STORE_DATA_OFFSET -
+                          RECORD_HEADER_SIZE - P8P_STATE_THUMB_SIZE) {
         result = -4;
         goto done;
     }
@@ -245,14 +260,8 @@ int p8p_state_save_file(const char *path, const p8p_cart_hash_t *cart_hash,
         }
     }
     used = read_u32(store + 12);
-    if (mz_compress2(store + used + RECORD_HEADER_SIZE + P8P_STATE_THUMB_SIZE,
-                     &compressed_size, (const unsigned char *)raw, raw_size,
-                     MZ_BEST_SPEED) != MZ_OK) {
-        result = -6;
-        goto done;
-    }
-    record_size = RECORD_HEADER_SIZE + P8P_STATE_THUMB_SIZE +
-                  (uint32_t)compressed_size;
+    memcpy(store + used + RECORD_HEADER_SIZE + P8P_STATE_THUMB_SIZE,
+           compressed, (size_t)compressed_size);
     sequence = read_u64(store + 16);
     if (!sequence) sequence = 1;
     memset(store + used, 0, RECORD_HEADER_SIZE);
@@ -272,6 +281,7 @@ int p8p_state_save_file(const char *path, const p8p_cart_hash_t *cart_hash,
     result = save_store(path, store);
 
 done:
+    free(compressed);
     free(raw);
     free(store);
     return result;
