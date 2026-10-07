@@ -52,6 +52,11 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- Fill-pattern shapes (`fillp` with `rectfill`, `circfill` and friends) are
+  drawn a row at a time instead of clipping and pattern-testing each pixel
+  separately. Celeste 2's tower room, whose background columns and fog are
+  pattern fills, needs 21% fewer host instructions per drawn frame. 27 of
+  the 65 tested carts use `fillp`; their frames are unchanged.
 - The interpreter checks its service hook (audio and input pumping during
   long frames) only at jumps, loop back-edges and calls instead of before
   every instruction, with the hook period cut from 8192 to 2048 so service

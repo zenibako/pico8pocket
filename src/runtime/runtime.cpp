@@ -759,6 +759,28 @@ static void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
     }
 }
 
+/* Fill-pattern span on screen coordinates already clipped by draw_hspan().
+ * Same result as screen_set() per pixel: a set pattern bit selects the high
+ * nibble of the colour, or skips the pixel when the pattern is transparent.
+ * Kept out of BRAM; Celeste 2 fills its background columns and fog this way. */
+static void __attribute__((noinline)) draw_hspan_pattern(
+        p8p_runtime_t *runtime, int x0, int x1, int y, int color) {
+    unsigned row = (runtime->fill_pattern >> (12 - 4 * (y & 3))) & 15u;
+    uint8_t clear = runtime->draw_palette[color & 15] & 15;
+    uint8_t set = runtime->draw_palette[(color >> 4) & 15] & 15;
+    int transparent = runtime->fill_pattern_transparent;
+    uint8_t *pixels = runtime->framebuffer + y * 128;
+    for (int x = x0; x <= x1; ++x) {
+        if ((row >> (3 - (x & 3))) & 1u) {
+            if (!transparent)
+                pixels[x] = set;
+        } else {
+            pixels[x] = clear;
+        }
+    }
+    runtime->screen_ram_dirty = 1;
+}
+
 static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
                                     int y, int color) {
     x0 -= runtime->camera_x;
@@ -781,9 +803,7 @@ static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
                (size_t)(x1 - x0 + 1));
         runtime->screen_ram_dirty = 1;
     } else {
-        for (int screen_x = x0; screen_x <= x1; ++screen_x)
-            screen_set(runtime, screen_x + runtime->camera_x,
-                       y + runtime->camera_y, color);
+        draw_hspan_pattern(runtime, x0, x1, y, color);
     }
 }
 
