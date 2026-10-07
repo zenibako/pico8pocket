@@ -52,6 +52,12 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- Table reads and writes with a constant name (`spr`, `level.width`,
+  `self.x`, `o.x = ...`) remember, per instruction, where in the table they
+  last found the key, and check that one slot before doing a full hash
+  lookup. Objects built the same way share the hint. In Celeste 2's tower
+  room the RV32 build runs 4.8% fewer instructions per frame (measured on
+  an RV32 build under QEMU); the hints take two bytes per Lua instruction.
 - The interpreter keeps the Lua program counter in a register and writes
   it back only before calls, errors, metamethods and the collector, checks
   hooks only at servicepoints, and no longer range-checks every opcode. On
