@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- The core is now `zenibako.pico8` on the `pico8` platform: its files live
+  in `Cores/zenibako.pico8`, `Assets/pico8/...` and `Platforms/pico8.json`
+  instead of `Askent.pico8pocket`/`pico8pocket`. To upgrade, move your
+  carts from `Assets/pico8pocket/common/cards/` to
+  `Assets/pico8/common/cards/` and delete `Cores/Askent.pico8pocket`,
+  `Assets/pico8pocket` and `Platforms/pico8pocket.json`. Save states,
+  settings and cartdata kept by the Pocket under `Saves/pico8pocket` move
+  to `Saves/pico8` the same way.
 - Cartridge pause-menu entries from `menuitem()` are listed in the Select
   system menu, right after RESUME (24 of 65 carts in one tested library add
   them). A selects an entry and closes the menu unless the callback returns

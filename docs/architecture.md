@@ -125,7 +125,7 @@ a core at 32 slots.
 
 Therefore the complete browser uses a two-part design:
 
-1. Cards live under `/Assets/pico8pocket/common/cards/` and can initially be
+1. Cards live under `/Assets/pico8/common/cards/` and can initially be
    selected with Pocket's native asset picker.
 2. A compact `cards.idx` catalog supplies paths, metadata, favorites, recent
    entries and ZIP members to the in-core browser. A host-side indexer updates

@@ -10,8 +10,9 @@ BUNDLE_LOCAL_CARTS="${BUNDLE_LOCAL_CARTS:-0}"
 CORE_JSON="$PROJECT_ROOT/dist/core/core.json"
 CORE_ID="$(jq -er '.core.metadata.author + "." + .core.metadata.shortname' \
     "$CORE_JSON")"
+PLATFORM_ID="$(jq -er '.core.metadata.platform_ids[0]' "$CORE_JSON")"
 CORE_DIR="$OUT/Cores/$CORE_ID"
-ASSET_DIR="$OUT/Assets/pico8pocket/common"
+ASSET_DIR="$OUT/Assets/$PLATFORM_ID/common"
 CART_DIRS=(
     "$PROJECT_ROOT/Доп игры"
     "$PROJECT_ROOT/Топ игры"
@@ -23,7 +24,7 @@ is_multicart_part() {
         *) return 1 ;;
     esac
 }
-INSTANCE_DIR="$OUT/Assets/pico8pocket/$CORE_ID"
+INSTANCE_DIR="$OUT/Assets/$PLATFORM_ID/$CORE_ID"
 PLATFORM_DIR="$OUT/Platforms"
 ELF="$PROJECT_ROOT/.obj/pico8pocket/app.elf"
 
@@ -33,7 +34,7 @@ ELF="$PROJECT_ROOT/.obj/pico8pocket/app.elf"
 rm -rf "$OUT"
 mkdir -p "$CORE_DIR" "$ASSET_DIR/cards" "$INSTANCE_DIR" "$PLATFORM_DIR"
 cp "$PROJECT_ROOT"/dist/core/*.json "$CORE_DIR/"
-cp "$PROJECT_ROOT/dist/platforms/pico8pocket.json" "$PLATFORM_DIR/"
+cp "$PROJECT_ROOT/dist/platforms/$PLATFORM_ID.json" "$PLATFORM_DIR/"
 cp "$SDK_ROOT/runtime/pocket/os20.rbf_r" "$CORE_DIR/"
 cp "$SDK_ROOT/runtime/pocket/loader.bin" "$CORE_DIR/"
 cp "$SDK_ROOT/runtime/pocket/os.bin" "$ASSET_DIR/"

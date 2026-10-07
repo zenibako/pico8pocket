@@ -102,7 +102,7 @@ started and how you can help improve it.
   deliberately not persisted, so every fresh core launch opens Pocket's native
   cartridge picker instead of reopening the previously used cart.
 - Public releases contain no cartridges or third-party sound banks. The
-  `Assets/pico8pocket/common/cards/` directory contains only installation
+  `Assets/pico8/common/cards/` directory contains only installation
   instructions; users provide cartridges they are entitled to use.
 - `make package` produces the public, cartridge-free Pocket ZIP containing the
   pinned `os20` bitstream and statically linked `rv32imafc` application.
@@ -169,11 +169,11 @@ launch, Pocket's native asset picker asks for a `.p8` or `.p8.png` cartridge.
 Install cartridges under:
 
 ```text
-/Assets/pico8pocket/common/cards/
+/Assets/pico8/common/cards/
 ```
 
 Analogue's APF inserts `common` for platform assets, so this is the canonical
-Pocket path corresponding to the requested `/assets/pico8pocket/cards` area.
+Pocket path corresponding to the requested `/assets/pico8/cards` area.
 At launch, Pocket's native asset picker selects the primary cart. The
 planned in-core browser will consume an index stored beside the cards; see
 [architecture.md](docs/architecture.md) for the APF filesystem constraint.

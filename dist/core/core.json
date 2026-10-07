@@ -2,10 +2,10 @@
     "core": {
         "magic": "APF_VER_1",
         "metadata": {
-            "platform_ids": ["pico8pocket"],
-            "shortname": "pico8pocket",
+            "platform_ids": ["pico8"],
+            "shortname": "pico8",
             "description": "PICO-8 player on openfpgaOS",
-            "author": "Askent",
+            "author": "zenibako",
             "url": "",
             "version": "0.0.33",
             "date_release": "2026-10-06"
