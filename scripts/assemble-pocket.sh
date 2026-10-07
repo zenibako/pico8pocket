@@ -32,9 +32,11 @@ ELF="$PROJECT_ROOT/.obj/pico8pocket/app.elf"
 [[ -f "$SDK_ROOT/runtime/pocket/os20.rbf_r" ]] || { echo "Missing openfpgaOS runtime; run make deps" >&2; exit 1; }
 
 rm -rf "$OUT"
-mkdir -p "$CORE_DIR" "$ASSET_DIR/cards" "$INSTANCE_DIR" "$PLATFORM_DIR"
+mkdir -p "$CORE_DIR" "$ASSET_DIR/cards" "$INSTANCE_DIR" "$PLATFORM_DIR/_images"
 cp "$PROJECT_ROOT"/dist/core/*.json "$CORE_DIR/"
 cp "$PROJECT_ROOT/dist/platforms/$PLATFORM_ID.json" "$PLATFORM_DIR/"
+# Platform banner, generated from assets/branding by scripts/platform-image.py.
+cp "$PROJECT_ROOT/dist/platforms/_images/$PLATFORM_ID.bin" "$PLATFORM_DIR/_images/"
 cp "$SDK_ROOT/runtime/pocket/os20.rbf_r" "$CORE_DIR/"
 cp "$SDK_ROOT/runtime/pocket/loader.bin" "$CORE_DIR/"
 cp "$SDK_ROOT/runtime/pocket/os.bin" "$ASSET_DIR/"

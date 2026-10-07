@@ -55,6 +55,13 @@ EXPECTED_SCALER_ORDER="320x240,320x200,320x224,320x256,320x288,400x300,256x240,6
     exit 1
 }
 jq -e . "$TREE/Platforms/$PLATFORM_ID.json" >/dev/null
+PLATFORM_IMAGE="$TREE/Platforms/_images/$PLATFORM_ID.bin"
+[[ -f "$PLATFORM_IMAGE" ]] || { echo "Missing Platforms/_images/$PLATFORM_ID.bin" >&2; exit 1; }
+# 521x165 16-bit pixels (stored rotated, 165x521).
+[[ "$(wc -c < "$PLATFORM_IMAGE")" -eq $((521 * 165 * 2)) ]] || {
+    echo "Platform image must be 521x165 16-bit (171930 bytes)" >&2
+    exit 1
+}
 jq -e '.platform.category == "Computer"' "$TREE/Platforms/$PLATFORM_ID.json" >/dev/null || {
     echo "Platform category must be Computer for AnalogueOS grouping" >&2
     exit 1
