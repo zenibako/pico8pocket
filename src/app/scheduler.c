@@ -3,7 +3,10 @@
 int p8p_render_divisor_for_load(int target_fps, uint32_t full_frame_us,
                                 uint32_t update_only_us, uint32_t audio_us,
                                 uint32_t present_us) {
-    uint32_t budget_us = target_fps == 30 ? 30000u : 15000u;
+    /* A 30 fps frame lasts 33.3 ms; 32 ms leaves room for input, the
+     * overlay and pacing.  At 30 ms Celeste 2's tower rooms and grapple
+     * dropped to divisor 2 although their frames fit. */
+    uint32_t budget_us = target_fps == 30 ? 32000u : 15000u;
     int maximum_divisor = target_fps == 30 ? 2 : 4;
     uint32_t update_us = update_only_us ? update_only_us : full_frame_us / 4u;
     uint32_t draw_us = full_frame_us > update_us ?

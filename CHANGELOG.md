@@ -52,6 +52,10 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- The frame-skip budget at 30 fps is 32 ms instead of 30 ms (a frame lasts
+  33.3 ms). Celeste 2's tower rooms and grapple rope, whose frames fit,
+  were dropping to every other frame drawn; on the Pocket they now stay at
+  30 visible FPS.
 - The diagnostics overlay shows F, the full runtime step the frame-skip
   scheduler times (update and draw plus audio serviced mid-frame, GC and
   frame setup). R1 is kept while F + A + P fits the budget; U and D alone
