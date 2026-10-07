@@ -52,6 +52,11 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- `time()`/`t()` compute frames ÷ FPS with integer arithmetic instead of a
+  double-precision divide and conversion, which the Pocket emulates in
+  software (identical results, checked over 236 million frame counts).
+  Celeste 2 calls `time()` for every pixel of its grapple rope: drawing an
+  80-pixel rope costs about 30% fewer instructions.
 - Table reads and writes with a constant name (`spr`, `level.width`,
   `self.x`, `o.x = ...`) remember, per instruction, where in the table they
   last found the key, and check that one slot before doing a full hash

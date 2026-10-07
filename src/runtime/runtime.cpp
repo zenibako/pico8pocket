@@ -1838,9 +1838,14 @@ static int api_rnd(lua_State *lua) {
 
 static int api_time(lua_State *lua) {
     profile_api(P8P_API_HELPER);
-    double seconds = (double)active_runtime->frame_count /
-                     (double)active_runtime->target_fps;
-    lua_pushnumber(lua, fix32(seconds));
+    /* frame_count / fps in 16.16 fixed point, truncated and wrapped exactly
+     * like fix32((double)frame_count / fps) but without the soft-float
+     * divide and conversion (several hundred RV32 instructions per call;
+     * Celeste 2 calls time() for every pixel of its grapple rope). */
+    uint32_t fps = (uint32_t)active_runtime->target_fps;
+    uint32_t frames = active_runtime->frame_count;
+    uint32_t bits = (frames / fps) * 65536u + ((frames % fps) << 16) / fps;
+    lua_pushnumber(lua, fix32::frombits((int32_t)bits));
     return 1;
 }
 
