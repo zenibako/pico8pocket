@@ -37,8 +37,9 @@ struct p8p_runtime {
     uint8_t cart_rom[P8P_CART_ROM_SIZE];
     /* One byte per logical pixel is the fast drawing surface.  PICO-8's
      * packed 4-bpp screen RAM is synchronized only when a memory API touches
-     * it, avoiding a read-modify-write for every rendered pixel. */
-    uint8_t framebuffer[128 * 128];
+     * it, avoiding a read-modify-write for every rendered pixel.  Word
+     * aligned so fill patterns can write four pixels at a time. */
+    alignas(4) uint8_t framebuffer[128 * 128];
     uint8_t screen_ram_dirty;
     /* RAM address the framebuffer mirrors: the screen at 0x6000 unless the
      * cart redirects drawing with 0x5f55 (e.g. into the sprite sheet). */
@@ -759,25 +760,73 @@ static void draw_sprite(p8p_runtime_t *runtime, int sprite, int x,
     }
 }
 
-/* Fill-pattern span on screen coordinates already clipped by draw_hspan().
+/* Fill patterns on screen coordinates already clipped to the clip rectangle.
  * Same result as screen_set() per pixel: a set pattern bit selects the high
- * nibble of the colour, or skips the pixel when the pattern is transparent.
- * Kept out of BRAM; Celeste 2 fills its background columns and fog this way. */
-static void __attribute__((noinline)) draw_hspan_pattern(
-        p8p_runtime_t *runtime, int x0, int x1, int y, int color) {
+ * nibble of the colour, or leaves the pixel alone when the pattern is
+ * transparent.  Byte k of fill/keep is the pixel at x % 4 == k
+ * (little-endian words); keep marks the pixels left alone.  Kept out of
+ * BRAM; Celeste 2 fills its background columns and fog this way. */
+struct pattern_row {
+    uint32_t fill;
+    uint32_t keep;
+};
+
+static pattern_row fill_pattern_row(const p8p_runtime_t *runtime, int y,
+                                    int color) {
     unsigned row = (runtime->fill_pattern >> (12 - 4 * (y & 3))) & 15u;
     uint8_t clear = runtime->draw_palette[color & 15] & 15;
     uint8_t set = runtime->draw_palette[(color >> 4) & 15] & 15;
-    int transparent = runtime->fill_pattern_transparent;
-    uint8_t *pixels = runtime->framebuffer + y * 128;
-    for (int x = x0; x <= x1; ++x) {
-        if ((row >> (3 - (x & 3))) & 1u) {
-            if (!transparent)
-                pixels[x] = set;
-        } else {
-            pixels[x] = clear;
-        }
+    pattern_row result = {0, 0};
+    for (int k = 0; k < 4; ++k) {
+        int pattern_bit = (row >> (3 - k)) & 1u;
+        if (pattern_bit && runtime->fill_pattern_transparent)
+            result.keep |= 0xffu << (8 * k);
+        else
+            result.fill |= (uint32_t)(pattern_bit ? set : clear) << (8 * k);
     }
+    return result;
+}
+
+static inline void fill_pattern_span(uint8_t *row_pixels, int x0, int x1,
+                                     pattern_row pattern) {
+    int x = x0;
+    for (; x <= x1 && (x & 3); ++x)
+        if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
+            row_pixels[x] = (uint8_t)(pattern.fill >> (8 * (x & 3)));
+    uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels, 4);
+    if (pattern.keep) {
+        for (; x + 3 <= x1; x += 4) {
+            uint32_t word;
+            memcpy(&word, aligned + x, 4);
+            word = (word & pattern.keep) | pattern.fill;
+            memcpy(aligned + x, &word, 4);
+        }
+    } else {
+        for (; x + 3 <= x1; x += 4)
+            memcpy(aligned + x, &pattern.fill, 4);
+    }
+    for (; x <= x1; ++x)
+        if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
+            row_pixels[x] = (uint8_t)(pattern.fill >> (8 * (x & 3)));
+}
+
+static void __attribute__((noinline)) draw_hspan_pattern(
+        p8p_runtime_t *runtime, int x0, int x1, int y, int color) {
+    fill_pattern_span(runtime->framebuffer + y * 128, x0, x1,
+                      fill_pattern_row(runtime, y, color));
+    runtime->screen_ram_dirty = 1;
+}
+
+/* rectfill() with a fill pattern: the pattern repeats every four rows, so
+ * work them out once instead of per row. */
+static void __attribute__((noinline)) draw_rect_pattern(
+        p8p_runtime_t *runtime, int x0, int x1, int y0, int y1, int color) {
+    pattern_row rows[4];
+    for (int k = 0; k < 4; ++k)
+        rows[(y0 + k) & 3] = fill_pattern_row(runtime, y0 + k, color);
+    for (int y = y0; y <= y1; ++y)
+        fill_pattern_span(runtime->framebuffer + y * 128, x0, x1,
+                          rows[y & 3]);
     runtime->screen_ram_dirty = 1;
 }
 
@@ -891,6 +940,24 @@ static int api_rectfill(lua_State *lua) {
     if (y1 > visible_y1) y1 = visible_y1;
     if (y0 > y1)
         return 0;
+    if (runtime->fill_pattern) {
+        /* Same clipping as draw_hspan(), done once for every row. */
+        int screen_x0 = x0 - runtime->camera_x;
+        int screen_x1 = x1 - runtime->camera_x;
+        if (screen_x0 > screen_x1) {
+            int temporary = screen_x0;
+            screen_x0 = screen_x1;
+            screen_x1 = temporary;
+        }
+        if (screen_x0 < runtime->clip_x0) screen_x0 = runtime->clip_x0;
+        if (screen_x1 >= runtime->clip_x1) screen_x1 = runtime->clip_x1 - 1;
+        if (screen_x0 > screen_x1)
+            return 0;
+        draw_rect_pattern(runtime, screen_x0, screen_x1,
+                          y0 - runtime->camera_y, y1 - runtime->camera_y,
+                          color);
+        return 0;
+    }
     for (int y = y0; y <= y1; ++y)
         draw_hspan(runtime, x0, x1, y, color);
     return 0;
