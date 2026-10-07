@@ -2965,9 +2965,9 @@ extern "C" int p8p_runtime_load(p8p_runtime_t *runtime, const p8p_cart_t *cart) 
     runtime->cart_thread_kind = 0;
     runtime->restart_requested = 0;
     if (!runtime->cart_thread ||
-        luaL_loadbuffer(runtime->cart_thread, runtime->cart_lua,
-                        runtime->cart_lua_size,
-                        "cart.p8") != LUA_OK) {
+        luaL_loadbufferx(runtime->cart_thread, runtime->cart_lua,
+                         runtime->cart_lua_size, "cart.p8",
+                         "t") != LUA_OK) {
         set_thread_error(runtime, "cart", runtime->cart_thread);
         return -4;
     }

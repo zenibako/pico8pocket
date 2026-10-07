@@ -52,6 +52,15 @@
   call or return hooks are set. Celeste 2 makes about 1,900 such calls per
   frame; together with the sandbox change it needs 9.4% fewer host
   instructions per frame than before, Moss Moss 2.7% fewer.
+- The interpreter keeps the Lua program counter in a register and writes
+  it back only before calls, errors, metamethods and the collector, checks
+  hooks only at servicepoints, and no longer range-checks every opcode. On
+  the Pocket the per-instruction dispatch drops from 17 to 11 RV32
+  instructions with no branches, and the interpreter loop takes 600 fewer
+  bytes of BRAM. Error messages report the same lines as before.
+- `load()` and `loadfile()` accept Lua source only, not precompiled
+  bytecode, which Lua 5.2 runs without verifying (PICO-8 has neither
+  function).
 - Fill-pattern shapes (`fillp` with `rectfill`, `circfill` and friends) are
   drawn four pixels at a time instead of clipping and pattern-testing each
   pixel separately, and `rectfill` works out its pattern rows once per

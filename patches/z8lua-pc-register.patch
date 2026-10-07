@@ -1,0 +1,249 @@
+Keep the Lua program counter in a local instead of the CallInfo.
+
+luaV_execute loaded and stored ci->u.l.savedpc on every instruction and
+checked the hook mask for line hooks.  The pc now lives in a local and is
+written back before calls, hooks, errors, metamethods and the collector
+(Protect/savepc); hooks of any kind are checked at servicepoints only.
+The opcode switch drops its range check, so load() and loadfile() accept
+source text only (Lua 5.2 does not verify precompiled chunks).
+
+diff --git a/lbaselib.c b/lbaselib.c
+--- a/lbaselib.c
++++ b/lbaselib.c
+@@ -272,7 +272,7 @@
+ 
+ static int luaB_loadfile (lua_State *L) {
+   const char *fname = luaL_optstring(L, 1, NULL);
+-  const char *mode = luaL_optstring(L, 2, NULL);
++  const char *mode = "t";  /* Pico8Pocket: source only; see luaB_load */
+   int env = (!lua_isnone(L, 3) ? 3 : 0);  /* 'env' index or 0 if no 'env' */
+   int status = luaL_loadfilex(L, fname, mode);
+   return load_aux(L, status, env);
+@@ -321,7 +321,9 @@
+   int status;
+   size_t l;
+   const char *s = lua_tolstring(L, 1, &l);
+-  const char *mode = luaL_optstring(L, 3, "bt");
++  /* Pico8Pocket: source text only.  Lua 5.2 does not verify precompiled
++     chunks, and the interpreter trusts opcodes from its own compiler. */
++  const char *mode = "t";
+   int env = (!lua_isnone(L, 4) ? 4 : 0);  /* 'env' index or 0 if no 'env' */
+   if (s != NULL) {  /* loading a string? */
+     const char *chunkname = luaL_optstring(L, 2, s);
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -597,14 +597,14 @@
+ #define RKC(i)	check_exp(getCMode(GET_OPCODE(i)) == OpArgK, \
+ 	ISK(GETARG_C(i)) ? k+INDEXK(GETARG_C(i)) : base+GETARG_C(i))
+ #define KBx(i)  \
+-  (k + (GETARG_Bx(i) != 0 ? GETARG_Bx(i) - 1 : GETARG_Ax(*ci->u.l.savedpc++)))
++  (k + (GETARG_Bx(i) != 0 ? GETARG_Bx(i) - 1 : GETARG_Ax(*pc++)))
+ 
+ 
+ /* execute a jump instruction */
+ #define dojump(ci,i,e) \
+   { int a = GETARG_A(i); \
+     if (a > 0) luaF_close(L, ci->u.l.base + a - 1); \
+-    ci->u.l.savedpc += GETARG_sBx(i) + e; }
++    pc += GETARG_sBx(i) + e; }
+ 
+ /*
+ ** Pico8Pocket: the count hook (the runtime's audio/input service and its
+@@ -615,14 +615,23 @@
+ ** it on resume exactly as the per-instruction check did.
+ */
+ #define servicepoint() \
+-  { if ((L->hookmask & LUA_MASKCOUNT) && --L->hookcount == 0) { \
++  { if (L->hookmask && \
++        (!(L->hookmask & LUA_MASKCOUNT) || --L->hookcount == 0)) { \
+       Protect(traceexec(L)); ra = RA(i); } }
+ 
+ /* for test instructions, execute the jump instruction that follows it */
+-#define donextjump(ci)	{ servicepoint(); i = *ci->u.l.savedpc; dojump(ci, i, 1); }
++#define donextjump(ci)	{ servicepoint(); i = *pc; dojump(ci, i, 1); }
+ 
+ 
+-#define Protect(x)	{ {x;}; base = ci->u.l.base; }
++/*
++** Pico8Pocket: the program counter lives in a local ('pc') instead of
++** ci->u.l.savedpc, which is written back only before anything that may
++** read it: calls, hooks, errors, metamethods and the collector (Protect,
++** savepc).  Saves a load and a store on every instruction.
++*/
++#define savepc()	(ci->u.l.savedpc = pc)
++
++#define Protect(x)	{ savepc(); {x;}; base = ci->u.l.base; }
+ 
+ #define checkGC(L,c)  \
+   Protect( luaC_condGC(L,{L->top = (c);  /* limit of live values */ \
+@@ -659,20 +668,21 @@
+   LClosure *cl;
+   TValue *k;
+   StkId base;
++  const Instruction *pc;
+  newframe:  /* reentry point when frame changes (call/return) */
+   lua_assert(ci == L->ci);
+   cl = clLvalue(ci->func);
+   k = cl->p->k;
+   base = ci->u.l.base;
++  pc = ci->u.l.savedpc;
+   /* main loop of interpreter */
+   for (;;) {
+-    Instruction i = *(ci->u.l.savedpc++);
++    Instruction i = *(pc++);
+     StkId ra;
+-    /* Pico8Pocket: count hooks are checked at servicepoints (jumps, loop
+-       back-edges and calls), not on every instruction; see servicepoint. */
+-    if (L->hookmask & LUA_MASKLINE) {
+-      Protect(traceexec(L));
+-    }
++    /* Pico8Pocket: hooks are checked at servicepoints (jumps, loop
++       back-edges and calls), not on every instruction; see servicepoint.
++       The runtime only sets count hooks, and carts have no debug library,
++       so a line hook would just see fewer events. */
+     /* WARNING: several calls may realloc the stack and invalidate `ra' */
+     ra = RA(i);
+     lua_assert(base == ci->u.l.base);
+@@ -687,13 +697,13 @@
+       )
+       vmcase(OP_LOADKX,
+         TValue *rb;
+-        lua_assert(GET_OPCODE(*ci->u.l.savedpc) == OP_EXTRAARG);
+-        rb = k + GETARG_Ax(*ci->u.l.savedpc++);
++        lua_assert(GET_OPCODE(*pc) == OP_EXTRAARG);
++        rb = k + GETARG_Ax(*pc++);
+         setobj2s(L, ra, rb);
+       )
+       vmcase(OP_LOADBOOL,
+         setbvalue(ra, GETARG_B(i));
+-        if (GETARG_C(i)) ci->u.l.savedpc++;  /* skip next instruction (if C) */
++        if (GETARG_C(i)) pc++;  /* skip next instruction (if C) */
+       )
+       vmcase(OP_LOADNIL,
+         int b = GETARG_B(i);
+@@ -892,14 +902,14 @@
+           Protect(eq = luaV_equalobj_(L, rb, rc));
+         }
+         if (eq != GETARG_A(i))
+-          ci->u.l.savedpc++;
++          pc++;
+         else
+           donextjump(ci);
+       )
+       vmcase(OP_LT,
+         Protect(
+           if (luaV_lessthan(L, RKB(i), RKC(i)) != GETARG_A(i))
+-            ci->u.l.savedpc++;
++            pc++;
+           else
+             donextjump(ci);
+         )
+@@ -907,21 +917,21 @@
+       vmcase(OP_LE,
+         Protect(
+           if (luaV_lessequal(L, RKB(i), RKC(i)) != GETARG_A(i))
+-            ci->u.l.savedpc++;
++            pc++;
+           else
+             donextjump(ci);
+         )
+       )
+       vmcase(OP_TEST,
+         if (GETARG_C(i) ? l_isfalse(ra) : !l_isfalse(ra))
+-            ci->u.l.savedpc++;
++            pc++;
+           else
+           donextjump(ci);
+       )
+       vmcase(OP_TESTSET,
+         TValue *rb = RB(i);
+         if (GETARG_C(i) ? l_isfalse(rb) : !l_isfalse(rb))
+-          ci->u.l.savedpc++;
++          pc++;
+         else {
+           setobjs2s(L, ra, rb);
+           donextjump(ci);
+@@ -929,6 +939,7 @@
+       )
+       vmcase(OP_CALL,
+         servicepoint();
++        savepc();  /* the callee returns to, and errors report, this pc */
+         int b = GETARG_B(i);
+         int nresults = GETARG_C(i) - 1;
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+@@ -950,6 +961,7 @@
+       )
+       vmcase(OP_TAILCALL,
+         servicepoint();
++        savepc();
+         int b = GETARG_B(i);
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+         lua_assert(GETARG_C(i) - 1 == LUA_MULTRET);
+@@ -1003,7 +1015,7 @@
+                                    : luai_numle(L, idx, nvalue(ra)))
+         if (luai_numlt(L, 0, step) ? luai_numle(L, idx, limit)
+                                    : luai_numle(L, limit, idx)) {
+-          ci->u.l.savedpc += GETARG_sBx(i);  /* jump back */
++          pc += GETARG_sBx(i);  /* jump back */
+           setnvalue(ra, idx);  /* update internal index... */
+           setnvalue(ra+3, idx);  /* ...and external index */
+         }
+@@ -1012,6 +1024,7 @@
+         const TValue *init = ra;
+         const TValue *plimit = ra+1;
+         const TValue *pstep = ra+2;
++        savepc();  /* for the error messages */
+         if (!tonumber(init, ra))
+           luaG_runerror(L, LUA_QL("for") " initial value must be a number");
+         else if (!tonumber(plimit, ra+1))
+@@ -1019,7 +1032,7 @@
+         else if (!tonumber(pstep, ra+2))
+           luaG_runerror(L, LUA_QL("for") " step must be a number");
+         setnvalue(ra, luai_numsub(L, nvalue(ra), nvalue(pstep)));
+-        ci->u.l.savedpc += GETARG_sBx(i);
++        pc += GETARG_sBx(i);
+       )
+       vmcasenb(OP_TFORCALL,
+         StkId cb = ra + 3;  /* call base */
+@@ -1029,7 +1042,7 @@
+         L->top = cb + 3;  /* func. + 2 args (state and index) */
+         Protect(luaD_call(L, cb, GETARG_C(i), 1));
+         L->top = ci->top;
+-        i = *(ci->u.l.savedpc++);  /* go to next instruction */
++        i = *(pc++);  /* go to next instruction */
+         ra = RA(i);
+         lua_assert(GET_OPCODE(i) == OP_TFORLOOP);
+         goto l_tforloop;
+@@ -1039,7 +1052,7 @@
+         l_tforloop:
+         if (!ttisnil(ra + 1)) {  /* continue loop? */
+           setobjs2s(L, ra, ra + 1);  /* save control variable */
+-           ci->u.l.savedpc += GETARG_sBx(i);  /* jump back */
++           pc += GETARG_sBx(i);  /* jump back */
+         }
+       )
+       vmcase(OP_SETLIST,
+@@ -1049,9 +1062,10 @@
+         Table *h;
+         if (n == 0) n = cast_int(L->top - ra) - 1;
+         if (c == 0) {
+-          lua_assert(GET_OPCODE(*ci->u.l.savedpc) == OP_EXTRAARG);
+-          c = GETARG_Ax(*ci->u.l.savedpc++);
++          lua_assert(GET_OPCODE(*pc) == OP_EXTRAARG);
++          c = GETARG_Ax(*pc++);
+         }
++        savepc();
+         luai_runtimecheck(L, ttistable(ra));
+         h = hvalue(ra);
+         last = ((c-1)*LFIELDS_PER_FLUSH) + n;
+@@ -1095,6 +1109,9 @@
+       vmcase(OP_EXTRAARG,
+         lua_assert(0);
+       )
++      /* Pico8Pocket: opcodes come from our own compiler (carts are source,
++         never precompiled chunks), so the switch needs no range check. */
++      default: lua_assert(0); __builtin_unreachable();
+     }
+   }
+ }
