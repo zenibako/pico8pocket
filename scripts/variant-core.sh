@@ -40,6 +40,9 @@ name="pico8pocket$suffix"  # file names inside the platform folders
 mkdir -p "$dst/Cores" "$dst/Assets/$platform/common" "$dst/Platforms"
 cp -r "$src_core" "$dst/Cores/$variant_id"
 cp "$src/Platforms/$platform.json" "$dst/Platforms/"
+if [[ -d "$src/Platforms/_images" ]]; then
+    cp -r "$src/Platforms/_images" "$dst/Platforms/"
+fi
 common="$dst/Assets/$platform/common"
 cp "$src/Assets/$platform/common/os.bin" \
    "$src/Assets/$platform/common/p8p_pad5.bin" \

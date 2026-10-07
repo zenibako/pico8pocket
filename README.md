@@ -182,6 +182,14 @@ scripts/variant-core.sh releases/pico8pocket-v<VERSION>.zip b "Test build B" b.z
 It becomes `zenibako.pico8b`; its program, configuration, settings and save
 files get their own names, so neither core's files replace the other's.
 
+The platform banner `dist/platforms/_images/pico8.bin` is generated from
+`assets/branding/pico8-platform.png`; after changing the PNG, regenerate it
+with:
+
+```sh
+scripts/platform-image.py assets/branding/pico8-platform.png dist/platforms/_images/pico8.bin
+```
+
 The RISC-V build uses the same container toolchain as openfpgaOS. Docker,
 OrbStack, or Apple's `container` runtime is required unless a compatible
 `riscv64-elf`/`riscv64-unknown-elf` toolchain is installed locally.
@@ -195,6 +203,7 @@ The core is `zenibako.pico8` on the `pico8` platform (shown as PICO-8):
 /Assets/pico8/common/              application, OS and cards/
 /Assets/pico8/zenibako.pico8/      launch entry
 /Platforms/pico8.json
+/Platforms/_images/pico8.bin       PICO-8 banner in the platform list
 ```
 
 On launch, Pocket's native asset picker asks for a `.p8` or `.p8.png`

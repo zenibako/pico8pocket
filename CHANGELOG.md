@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The PICO-8 platform shows a PICO-8 banner in the Pocket's platform list
+  (`Platforms/_images/pico8.bin`, generated from
+  `assets/branding/pico8-platform.png` by `scripts/platform-image.py`).
 - The core is now `zenibako.pico8` on the `pico8` platform: its files live
   in `Cores/zenibako.pico8`, `Assets/pico8/...` and `Platforms/pico8.json`
   instead of `Askent.pico8pocket`/`pico8pocket`. To upgrade, move your
