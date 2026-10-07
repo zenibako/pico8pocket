@@ -36,6 +36,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-servicepoints.patch"
     "$PROJECT_ROOT/patches/z8lua-pc-register.patch"
     "$PROJECT_ROOT/patches/z8lua-inline-cache.patch"
+    "$PROJECT_ROOT/patches/z8lua-vm-tuning.patch"
 )
 
 fetch_one() {

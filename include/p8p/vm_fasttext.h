@@ -35,9 +35,9 @@ OF_FASTTEXT void luaD_callcfast(struct lua_State *lua,
  * compares numbers, nil, booleans and short strings inline
  * (patches/z8lua-eq-fastpath.patch), so its BRAM went to the __index chain
  * call sites. */
-OF_FASTTEXT int luaV_lessthan(struct lua_State *lua,
-                              const struct lua_TValue *left,
-                              const struct lua_TValue *right);
+/* luaV_lessthan is only the slow path now that OP_LT/OP_LE compare numbers
+ * inline (patches/z8lua-vm-tuning.patch); fastchain and the icache miss
+ * path also live in SDRAM, leaving BRAM to the dispatch loop. */
 OF_FASTTEXT const struct lua_TValue *luaV_tonumber(
     const struct lua_TValue *object, struct lua_TValue *number);
 OF_FASTTEXT const struct lua_TValue *luaH_get(

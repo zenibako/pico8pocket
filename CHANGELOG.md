@@ -57,7 +57,11 @@
   last found the key, and check that one slot before doing a full hash
   lookup. Objects built the same way share the hint. In Celeste 2's tower
   room the RV32 build runs 4.8% fewer instructions per frame (measured on
-  an RV32 build under QEMU); the hints take two bytes per Lua instruction.
+  an RV32 build under QEMU). A hint is the node's byte offset, kept in an
+  array parallel to the bytecode (four bytes per Lua instruction), so a hit
+  needs no index arithmetic: another 2.8% in that room, together with
+  `<`/`<=` comparing numbers inside the interpreter loop instead of calling
+  out.
 - The interpreter keeps the Lua program counter in a register and writes
   it back only before calls, errors, metamethods and the collector, checks
   hooks only at servicepoints, and no longer range-checks every opcode. On

@@ -1,0 +1,168 @@
+Cheaper inline-cache hints and inline number comparisons.
+
+Hints become byte offsets in an array parallel to the code, found by
+adding a fixed distance to the instruction address, so a hit needs no
+index arithmetic or spilled locals.  OP_LT and OP_LE compare numbers
+inline.  fastchain moves out of BRAM to make room.
+
+diff --git a/lobject.h b/lobject.h
+--- a/lobject.h
++++ b/lobject.h
+@@ -474,9 +474,9 @@
+   Upvaldesc *upvalues;  /* upvalue information */
+   union Closure *cache;  /* last created closure with this prototype */
+   /* Pico8Pocket: per-instruction hash-node hints for constant-string-key
+-     table accesses (see icache_get in lvm.c); allocated on first call,
+-     never persisted. */
+-  unsigned short *icache;
++     table accesses (see icache_get in lvm.c), parallel to 'code';
++     allocated on first call, never persisted. */
++  lu_int32 *icache;
+   TString  *source;  /* used for debug information */
+   int sizeupvalues;  /* size of 'upvalues' */
+   int sizek;  /* size of `k' */
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -182,7 +182,8 @@
+ ** types return NULL and take luaV_gettable (and the sandbox fallback) as
+ ** before.  Kept out of line so the direct-hit path is unchanged.
+ */
+-static LUAI_VM_HOT __attribute__((noinline))
++/* Out of BRAM: only _ENV-object misses get here. */
++static __attribute__((noinline))
+ const TValue *fastchain (lua_State *L, const TValue *t, const TValue *key) {
+   int loop;
+   if (!ttisshrstring(key)) return NULL;
+@@ -204,13 +205,16 @@
+ ** A hit is one node check: same interned key, non-nil value.  This holds
+ ** whatever happened to the table since (a key occurs at most once in a
+ ** table) and whatever table it is now, so objects built alike share hits.
+-** Anything else takes the full lookup, which refreshes the hint.
++** Anything else takes the full lookup, which refreshes the hint.  A hint
++** is the byte offset of the node in the table's node array, and the hint
++** array parallels the code array, so the VM finds an instruction's hint by
++** adding a fixed distance to its address.
+ */
+-#define ICACHE_EMPTY	0xffffu
++#define ICACHE_EMPTY	0xffffffffu
+ 
+-static unsigned short *icache_new (lua_State *L, Proto *p) {
++static lu_int32 *icache_new (lua_State *L, Proto *p) {
+   int j;
+-  unsigned short *ic = luaM_newvector(L, p->sizecode, unsigned short);
++  lu_int32 *ic = luaM_newvector(L, p->sizecode, lu_int32);
+   for (j = 0; j < p->sizecode; j++) ic[j] = ICACHE_EMPTY;
+   p->icache = ic;
+   return ic;
+@@ -218,13 +222,12 @@
+ 
+ /* Out of BRAM: hits are inline, and misses are rare once hints settle. */
+ static __attribute__((noinline))
+-TValue *icache_miss (Table *h, TString *key, unsigned short *hint) {
++TValue *icache_miss (Table *h, TString *key, lu_int32 *hint) {
+   Node *n = gnode(h, lmod(key->tsv.hash, sizenode(h)));  /* hashstr */
+   do {
+     if (ttisshrstring(gkey(n)) && eqshrstr(rawtsvalue(gkey(n)), key)) {
+-      size_t idx = cast(size_t, n - gnode(h, 0));
+       if (ttisnil(gval(n))) return NULL;
+-      if (idx < ICACHE_EMPTY) *hint = cast(unsigned short, idx);
++      *hint = cast(lu_int32, cast(char *, n) - cast(char *, h->node));
+       return gval(n);
+     }
+     n = gnext(n);
+@@ -232,11 +235,10 @@
+   return NULL;
+ }
+ 
+-static inline TValue *icache_get (Table *h, TString *key,
+-                                  unsigned short *hint) {
+-  unsigned idx = *hint;
+-  if (idx < cast(unsigned, sizenode(h))) {
+-    Node *n = gnode(h, idx);
++static inline TValue *icache_get (Table *h, TString *key, lu_int32 *hint) {
++  lu_int32 offset = *hint;
++  if (offset < cast(lu_int32, sizeof(Node) << h->lsizenode)) {
++    Node *n = cast(Node *, cast(char *, h->node) + offset);
+     if (ttisshrstring(gkey(n)) && rawtsvalue(gkey(n)) == key &&
+         !ttisnil(gval(n)))
+       return gval(n);
+@@ -247,7 +249,8 @@
+ /* fastslot() for an instruction's key operand (constant when 'isk'). */
+ #define cachedslot(t,key,isk) \
+   ((isk) && ttistable(t) && ttisshrstring(key) \
+-     ? icache_get(hvalue(t), rawtsvalue(key), ic + (pc - 1 - code)) \
++     ? icache_get(hvalue(t), rawtsvalue(key), \
++                  cast(lu_int32 *, cast(char *, pc - 1) + icdist)) \
+      : fastslot(t, key))
+ 
+ /* fastset() through the cache. */
+@@ -725,17 +728,15 @@
+   TValue *k;
+   StkId base;
+   const Instruction *pc;
+-  const Instruction *code;
+-  unsigned short *ic;
++  ptrdiff_t icdist;  /* from an instruction to its icache hint */
+  newframe:  /* reentry point when frame changes (call/return) */
+   lua_assert(ci == L->ci);
+   cl = clLvalue(ci->func);
+   k = cl->p->k;
+   base = ci->u.l.base;
+   pc = ci->u.l.savedpc;
+-  code = cl->p->code;
+-  ic = cl->p->icache;
+-  if (ic == NULL) ic = icache_new(L, cl->p);
++  if (cl->p->icache == NULL) icache_new(L, cl->p);
++  icdist = cast(char *, cl->p->icache) - cast(char *, cl->p->code);
+   /* main loop of interpreter */
+   for (;;) {
+     Instruction i = *(pc++);
+@@ -969,21 +970,35 @@
+         else
+           donextjump(ci);
+       )
++      /* Pico8Pocket: numbers compare inline; strings and metamethods
++         take the call. */
+       vmcase(OP_LT,
+-        Protect(
+-          if (luaV_lessthan(L, RKB(i), RKC(i)) != GETARG_A(i))
+-            pc++;
+-          else
+-            donextjump(ci);
+-        )
++        TValue *rb = RKB(i);
++        TValue *rc = RKC(i);
++        int res;
++        if (ttisnumber(rb) && ttisnumber(rc))
++          res = luai_numlt(L, nvalue(rb), nvalue(rc));
++        else {
++          Protect(res = luaV_lessthan(L, rb, rc));
++        }
++        if (res != GETARG_A(i))
++          pc++;
++        else
++          donextjump(ci);
+       )
+       vmcase(OP_LE,
+-        Protect(
+-          if (luaV_lessequal(L, RKB(i), RKC(i)) != GETARG_A(i))
+-            pc++;
+-          else
+-            donextjump(ci);
+-        )
++        TValue *rb = RKB(i);
++        TValue *rc = RKC(i);
++        int res;
++        if (ttisnumber(rb) && ttisnumber(rc))
++          res = luai_numle(L, nvalue(rb), nvalue(rc));
++        else {
++          Protect(res = luaV_lessequal(L, rb, rc));
++        }
++        if (res != GETARG_A(i))
++          pc++;
++        else
++          donextjump(ci);
+       )
+       vmcase(OP_TEST,
+         if (GETARG_C(i) ? l_isfalse(ra) : !l_isfalse(ra))
