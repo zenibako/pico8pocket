@@ -6,8 +6,9 @@
 #
 # The variant core is Cores/Askent.pico8pocket<SUFFIX>.  It stays on the
 # pico8pocket platform, so both cores browse the same Assets/pico8pocket
-# cards, but its application, OS config, settings and save files get their
-# own names and never overwrite the original core's.  The OS binary and
+# cards, but its game entry, application, OS config, settings and save
+# files get their own names: no file shares a name with the original core's,
+# so copying one core's files can never replace the other's.  The OS binary and
 # compatibility pads are shared.
 set -euo pipefail
 
@@ -54,7 +55,9 @@ json.dump(data, open(path, "w"), indent=4)
 path = f"{core}/data.json"
 data = json.load(open(path))
 for slot in data["data"]["data_slots"]:
-    if slot.get("filename") == "pico8pocket.elf":
+    if slot.get("filename") == "pico8pocket.json":
+        slot["filename"] = f"{name}.json"
+    elif slot.get("filename") == "pico8pocket.elf":
         slot["filename"] = f"{name}.elf"
     elif slot.get("filename") == "pico8pocket.ini":
         slot["filename"] = f"{name}.ini"
@@ -68,8 +71,8 @@ sed -e "s/\"pico8pocket\.elf\"/\"$name.elf\"/" \
     -e "s/\"pico8pocket\.cfg\"/\"$name.cfg\"/" \
     -e "s/\"pico8pocket_\([0-9]\)\.sav\"/\"${name}_\1.sav\"/" \
     "$src/Assets/pico8pocket/Askent.pico8pocket/pico8pocket.json" \
-    > "$instance_dir/pico8pocket.json"
-if grep -q '"pico8pocket[._]' "$instance_dir/pico8pocket.json"; then
+    > "$instance_dir/$name.json"
+if grep -q '"pico8pocket[._]' "$instance_dir/$name.json"; then
     echo "instance JSON still names original files" >&2
     exit 1
 fi
