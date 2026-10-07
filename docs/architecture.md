@@ -145,7 +145,7 @@ would require a new Pocket firmware API from Analogue.
    graphics, input, map, palette, memory and utility API slice.
 3. **Implemented in alpha:** `.p8.png` decode, legacy/current compressed code,
    plus a 120-frame headless Celeste test.
-4. **Implemented in alpha:** integer/fixed-point 48 kHz SFX/music synthesis,
+4. **Implemented in alpha:** integer/fixed-point SFX/music synthesis (24 kHz, interpolated to 48 kHz),
    built-in waveforms, music sequencing and standard note effects.
 5. **Implemented in alpha:** paused system menu, content-keyed compressed save
    states with previews, English/Russian UI, per-cart controls, audio/display

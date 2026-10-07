@@ -45,7 +45,7 @@ Implemented and covered by host tests:
 - extended graphics (`sspr`, `tline`, ovals and `fillp`), sprite/map remapping,
   big-map memory, draw-state aliases and 8/16/32-bit memory APIs;
 - persistent `cartdata`, `dget` and `dset` records in Pocket save storage;
-- four-channel 48 kHz `sfx`/`music` playback with built-in waveforms, loops,
+- four-channel `sfx`/`music` playback (synthesized at 24 kHz, output at 48 kHz) with built-in waveforms, loops,
   music patterns, fades and the standard note effects;
 - Eris-based Lua state persistence together with RAM, renderer, input, RNG and
   audio state, compressed per cartridge with state previews;

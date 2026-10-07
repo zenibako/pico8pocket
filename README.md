@@ -27,18 +27,22 @@ started and how you can help improve it.
   60 FPS. Top-level and `_init` code also run cooperatively, so cartridges
   built around an infinite loop and `flip()` yield real frames instead of
   locking during load.
-- Overloaded 60 FPS cartridges use adaptive render decimation: gameplay and
-  input continue updating at 60 Hz while `_draw` and video presentation fall
-  back independently to 30, 20 or 15 FPS. This prevents effect-heavy scenes
-  from slowing the entire game clock. The profiler's white number reports the
-  resulting visible frame rate.
+- Overloaded cartridges use adaptive render decimation: gameplay and input
+  keep updating at full rate while `_draw` and video presentation fall back
+  independently (60 FPS carts to 30, 20 or 15 FPS; 30 FPS carts to 15). This
+  prevents effect-heavy scenes from slowing the entire game clock. A 30 FPS
+  frame keeps every draw while its measured cost fits 32 ms of the 33.3 ms
+  frame (15 ms at 60 FPS). The profiler's white number reports the resulting
+  visible frame rate.
 - The compatibility layer includes scaled `sspr`, texture-mapped `tline`,
   `oval`/`ovalfill`, patterned fills, 16/32-bit memory access, draw-state RAM
   aliases, remappable sprite/map memory and PICO-8's 32 KiB big-map mode.
-- The first audio backend implements `sfx()`/`music()`, four 48 kHz stereo
-  channels, the eight built-in waveforms, SFX loops, music patterns, fades and
-  the standard slide/vibrato/drop/fade/arpeggio effects. It is deliberately
-  integer/fixed-point to leave the RISC-V CPU available for the Lua VM.
+- The audio backend implements `sfx()`/`music()`, four channels, the eight
+  built-in waveforms, SFX loops, music patterns, fades and the standard
+  slide/vibrato/drop/fade/arpeggio effects. Voices are synthesized at 24 kHz
+  (PICO-8 itself runs at 22,050 Hz) and interpolated to the 48 kHz stereo
+  output, entirely in integer/fixed point to leave the RISC-V CPU available
+  for the Lua VM.
 - The current hardware-safe path scales 128×128 to 256×256 inside a proven
   320×288 openfpgaOS scanout. Pocket then scales the source 5×, producing a
   correct 1280×1280 image. Native 1408×1408 (11×) remains the target, but the
@@ -60,8 +64,9 @@ started and how you can help improve it.
   button, or pressing X from the main system menu, toggles the opt-in
   profiler. Its labelled rows show logical FPS (`L`), visible FPS (`V`), update
   time (`U`), draw time (`D`), audio time (`A`), presentation time (`P`), the
-  active render divisor (`R`) and approximate thousands of Lua instructions per
-  logical frame (`K`). A second column counts sprite/map work (`S`), primitive
+  active render divisor (`R`), a Lua activity count (`K`) and the full runtime
+  step the frame-skip scheduler measures (`F`: update and draw plus audio
+  serviced mid-frame, garbage collection and frame setup). A second column counts sprite/map work (`S`), primitive
   graphics calls (`G`), memory/map/flag access (`M`), draw-state changes (`C`),
   text calls (`T`), input reads (`B`) and helpers such as `rnd`, `all` and
   `foreach` (`Q`). The profiler is hidden on every fresh launch.
@@ -82,9 +87,16 @@ started and how you can help improve it.
   newline correctly. This fixes minified cartridges such as Moss Moss where a
   nested one-line `if` previously swallowed the following movement code into
   the wrong branch.
-- The Pocket build optimizes z8lua's hot dispatch loop with defined signed
-  wrapping. The input service hook is deliberately sparse, and scaled sprites
-  and ellipses avoid per-pixel division/64-bit implicit-equation work.
+- The interpreter is tuned for the Pocket's 100 MHz RV32 CPU (no
+  double-precision FPU, 8 KB instruction cache, 14 KB of zero-wait BRAM that
+  holds the dispatch loop). z8lua is patched (`patches/`) to keep the program
+  counter in a register, check its service hook only at jumps and calls,
+  cache the hash slot of every constant-name table access, compare numbers,
+  strings and nil inline, follow `__index` chains for `_ENV` objects, call
+  PICO-8 API functions through a short path and format numbers in fixed
+  point. `time()`, `all()` and fill patterns avoid software doubles,
+  per-element API calls and per-pixel work. Scaled sprites and ellipses avoid
+  per-pixel division/64-bit implicit-equation work.
 - The menu provides Quick Save, nine numbered state slots, 64×64 previews,
   guarded deletion, restart, cart switching, controls, pixel-perfect scale,
   volume/mute, cartridge info and English or Russian UI. States serialize Lua
@@ -112,9 +124,12 @@ started and how you can help improve it.
   rainbow bring-up square. Select remains available on that screen, allowing
   the cartridge to be restarted or exited without restarting the core.
 
+- Cartridge `menuitem()` entries appear in the Select system menu right after
+  RESUME, with their callbacks, left/right input and button filters.
+
 This is still an alpha, not a full-compatibility release. Local multicart
 switching, ZIP extraction and the indexed in-core browser are not implemented
-yet; cartridge `menuitem()` entries appear in the Select system menu. Save-state persistence, menu/input behavior, profiling and the current 2X
+yet. Save-state persistence, menu/input behavior, profiling and the current 2X
 presentation path have been validated on physical Pocket hardware. CPU-heavy
 cartridges and scaler behavior beyond the established 2X path still need more
 compatibility and performance work.
@@ -157,12 +172,38 @@ The local archive is named `pico8pocket-v<VERSION>-local.zip` so it cannot be
 mistaken for the public artifact. Local cartridge directories are ignored by
 Git.
 
+To compare two builds on hardware, repackage one as a separate core that
+installs beside the other and shares its cards:
+
+```sh
+scripts/variant-core.sh releases/pico8pocket-v<VERSION>.zip b "Test build B" b.zip
+```
+
+It becomes `zenibako.pico8b`; its program, configuration, settings and save
+files get their own names, so neither core's files replace the other's.
+
 The RISC-V build uses the same container toolchain as openfpgaOS. Docker,
 OrbStack, or Apple's `container` runtime is required unless a compatible
 `riscv64-elf`/`riscv64-unknown-elf` toolchain is installed locally.
 
-Install by extracting the release ZIP at the root of the Pocket SD card. On
-launch, Pocket's native asset picker asks for a `.p8` or `.p8.png` cartridge.
+Install by extracting the release ZIP at the root of the Pocket SD card,
+merging its `Cores`, `Assets` and `Platforms` folders with the existing ones.
+The core is `zenibako.pico8` on the `pico8` platform (shown as PICO-8):
+
+```text
+/Cores/zenibako.pico8/
+/Assets/pico8/common/              application, OS and cards/
+/Assets/pico8/zenibako.pico8/      launch entry
+/Platforms/pico8.json
+```
+
+On launch, Pocket's native asset picker asks for a `.p8` or `.p8.png`
+cartridge.
+
+Upgrading from a release that installed `Askent.pico8pocket`: move your carts
+from `/Assets/pico8pocket/common/cards/` to `/Assets/pico8/common/cards/`, then
+delete `/Cores/Askent.pico8pocket`, `/Assets/pico8pocket` and
+`/Platforms/pico8pocket.json`.
 
 ## Cartridge location
 
