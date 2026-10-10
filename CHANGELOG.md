@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `exit()` is a no-op instead of an undefined global. It is not PICO-8 API,
+  but Yarn calls it while drawing its score panel once all levels are
+  unlocked, which stopped the cart with "attempt to call global 'exit'". Carts
+  that define their own `exit` (Snail) keep theirs; save states are unaffected.
 - Muting audio in the system menu skips synthesizing it: music, notes,
   effects envelopes, fades and `serial()` PCM keep advancing exactly as they
   would audibly (`stat()` and music timing are unchanged, verified against

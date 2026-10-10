@@ -794,6 +794,22 @@ int main(void) {
         }
 
         {
+            /* exit() is not PICO-8 API, but Yarn calls it while drawing its
+             * score panel; it must be a harmless no-op. */
+            static const char exit_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "function _draw() cls() for i=1,2 do exit() end pset(0,0,7) end\n";
+            p8p_cart_t exit_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)exit_source,
+                                            sizeof(exit_source) - 1,
+                                            &exit_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &exit_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+            p8p_cart_destroy(&exit_cart);
+        }
+
+        {
             /* flip() inside _update ends the frame; the loop sees the next
              * step's input, as carts like Explorers expect. */
             static const char flip_loop_source[] =
