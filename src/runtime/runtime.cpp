@@ -2637,6 +2637,9 @@ static const luaL_Reg runtime_api[] = {
  * which was numbered under "cd", so moving it here keeps the IDs too. */
 static const luaL_Reg late_runtime_api[] = {
     {"cstore", api_stub}, {"trace", api_trace}, {"menuitem", api_menuitem},
+    /* Not PICO-8 API, but Yarn calls exit() while drawing its score panel
+     * once all levels are unlocked; a no-op lets it finish the frame. */
+    {"exit", api_stub},
     {NULL, NULL}
 };
 
@@ -2690,7 +2693,7 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local late={'cstore','trace','menuitem'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local late={'cstore','trace','menuitem','exit'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
     " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"

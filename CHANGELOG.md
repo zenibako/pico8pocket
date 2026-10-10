@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `exit()` is a no-op instead of an undefined global. It is not PICO-8 API,
+  but Yarn calls it while drawing its score panel once all levels are
+  unlocked, which stopped the cart with "attempt to call global 'exit'". Carts
+  that define their own `exit` (Snail) keep theirs; save states are unaffected.
 - The PICO-8 platform shows a PICO-8 banner in the Pocket's platform list
   (`Platforms/_images/pico8.bin`, generated from
   `assets/branding/pico8-platform.png` by `scripts/platform-image.py`).
