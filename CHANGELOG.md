@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `circfill()` and solid `rectfill()` clip each shape once and fill rows
+  four pixels at a time, instead of a clipped span call per row. Rows above
+  or below the clip rectangle are skipped. Output is identical (frame
+  hashes on 114 carts plus a fuzzed camera/clip/fillp/pal cart); Celeste 2's
+  tower room saves about 2-3% of a frame.
 - `exit()` is a no-op instead of an undefined global. It is not PICO-8 API,
   but Yarn calls it while drawing its score panel once all levels are
   unlocked, which stopped the cart with "attempt to call global 'exit'". Carts
