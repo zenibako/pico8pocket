@@ -52,6 +52,8 @@ static int run_scan(const char *path, unsigned frames, uint32_t seed,
     p8p_runtime_t *runtime = nullptr;
     uint64_t elapsed_ns = 0;
     uint64_t slowest_ns = 0;
+    const char *every_frame_env = std::getenv("P8P_EVERY_FRAME");
+    int every_frame = every_frame_env && every_frame_env[0] == '1';
 
     if (p8p_cart_load_file(path, &cart) != 0) {
         std::fprintf(stderr, "cannot load %s\n", path);
@@ -104,6 +106,10 @@ static int run_scan(const char *path, unsigned frames, uint32_t seed,
             p8p_cart_destroy(&cart);
             return 4;
         }
+        /* P8P_EVERY_FRAME=1 prints every frame's hash, to diff two builds
+         * frame by frame (see .claude/skills/pico8pocket-compat). */
+        if (every_frame)
+            std::printf("f%u %08x\n", frame, framebuffer_hash(runtime));
         if ((frame + 1) % 100000u == 0)
             std::printf("frame=%u hash=%08x avg=%.3fms max=%.3fms\n",
                         frame + 1, framebuffer_hash(runtime),
