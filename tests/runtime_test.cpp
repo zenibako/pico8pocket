@@ -749,6 +749,18 @@ int main(void) {
         }
 
         {
+            /* Muted output skips synthesis but must keep time: 9600 skipped
+             * frames advance the music by the same 24 ticks as rendering. */
+            audio_crossings_for(runtime,
+                                "music(0) end function _update() "
+                                "t=stat(26) end function _draw() "
+                                "if t==48 then pset(0,0,7) end");
+            p8p_runtime_audio_skip(runtime, 9600);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
+        }
+
+        {
             /* serial(0x808) queues 8-bit PCM; stat(108) counts what is left
              * and rendering drains it at 5512.5 Hz (100 samples ~ 871). */
             static const char pcm_source[] =
@@ -766,6 +778,16 @@ int main(void) {
             CHECK(p8p_runtime_framebuffer(runtime)[0] == 7);
             CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
             audio_crossings(runtime, 1000);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
+            /* Muted, the queue drains at the same rate. */
+            CHECK(p8p_runtime_load(runtime, &pcm_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
+            p8p_runtime_audio_skip(runtime, 869);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            CHECK(p8p_runtime_framebuffer(runtime)[1] == 0);
+            p8p_runtime_audio_skip(runtime, 131);
             CHECK(p8p_runtime_step(runtime, 0) == 0);
             CHECK(p8p_runtime_framebuffer(runtime)[1] == 7);
             p8p_cart_destroy(&pcm_cart);

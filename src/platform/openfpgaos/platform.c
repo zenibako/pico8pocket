@@ -217,11 +217,19 @@ void p8p_platform_audio_pump(p8p_runtime_t *runtime) {
         int written;
         if (count > 1024) count = 1024;
         if (count > free_frames) count = free_frames;
-        if (!audio_paused || audio_gain_q15 > 0)
+        if (audio_volume == 0 && !audio_paused) {
+            /* Muted: keep music, notes and PCM moving without synthesizing
+             * them, which frees the audio share of every frame. */
+            p8p_runtime_audio_skip(runtime, (size_t)count);
+            memset(audio_buffer, 0, (size_t)count * 2 * sizeof(*audio_buffer));
+            audio_gain_q15 = 32768;
+        } else if (!audio_paused || audio_gain_q15 > 0)
             p8p_runtime_audio_render(runtime, audio_buffer, (size_t)count);
         else
             memset(audio_buffer, 0, (size_t)count * 2 * sizeof(*audio_buffer));
-        if (!audio_paused && audio_gain_q15 == 32768 &&
+        if (audio_volume == 0 && !audio_paused) {
+            /* already silent */
+        } else if (!audio_paused && audio_gain_q15 == 32768 &&
             audio_volume == 100) {
             /* Normal gameplay already has unity gain.  The old loop still
              * multiplied and divided every stereo sample, wasting a visible

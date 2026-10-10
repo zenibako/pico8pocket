@@ -62,6 +62,7 @@ const uint8_t *p8p_runtime_framebuffer(p8p_runtime_t *runtime);
 const uint8_t *p8p_runtime_screen_palette(p8p_runtime_t *runtime);
 void p8p_runtime_audio_render(p8p_runtime_t *runtime, int16_t *stereo,
                               size_t frames);
+void p8p_runtime_audio_skip(p8p_runtime_t *runtime, size_t frames);
 int p8p_runtime_save_state(p8p_runtime_t *runtime, void **data, size_t *size);
 int p8p_runtime_load_state(p8p_runtime_t *runtime, const void *data,
                            size_t size);

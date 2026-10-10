@@ -42,7 +42,9 @@ started and how you can help improve it.
   slide/vibrato/drop/fade/arpeggio effects. Voices are synthesized at 24 kHz
   (PICO-8 itself runs at 22,050 Hz) and interpolated to the 48 kHz stereo
   output, entirely in integer/fixed point to leave the RISC-V CPU available
-  for the Lua VM.
+  for the Lua VM. Muting in the system menu skips synthesis altogether while
+  music and effects keep their timing, so a CPU-heavy cart can be muted to
+  gain a few milliseconds per frame.
 - The current hardware-safe path scales 128×128 to 256×256 inside a proven
   320×288 openfpgaOS scanout. Pocket then scales the source 5×, producing a
   correct 1280×1280 image. Native 1408×1408 (11×) remains the target, but the
