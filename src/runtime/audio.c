@@ -730,8 +730,8 @@ int p8p_audio_music_ticks(const p8p_audio_t *audio) {
 }
 
 /* One mono sample at P8P_SYNTH_RATE: all four channels plus PCM. */
-static int32_t synthesize(p8p_audio_t *audio) {
-    int32_t mix = 0;
+/* Music position and fade, once per synthesized sample. */
+static void advance_sequencer(p8p_audio_t *audio) {
     if (audio->music_pattern >= 0) {
         if (audio->music_samples_remaining == 0)
             advance_music(audio);
@@ -749,7 +749,11 @@ static int32_t synthesize(p8p_audio_t *audio) {
             audio->music_fade_step = 0;
         }
     }
+}
 
+static int32_t synthesize(p8p_audio_t *audio) {
+    int32_t mix = 0;
+    advance_sequencer(audio);
     for (int index = 0; index < 4; ++index) {
         p8p_audio_channel_t *channel = &audio->channels[index];
         p8p_audio_extra_t *extra = &audio->extra[index];
@@ -817,6 +821,121 @@ static int32_t synthesize(p8p_audio_t *audio) {
     if (mix > 32767) mix = 32767;
     if (mix < -32768) mix = -32768;
     return mix;
+}
+
+/*
+ * Mute: advance everything with timing -- music position and fades, notes
+ * with their slides and volume envelopes, custom instruments and the PCM
+ * stream -- exactly as synthesize() does, but make no sound.  Oscillator
+ * and noise phases, vibrato, reverb and filters only shape the waveform and
+ * are left alone.
+ */
+static void silent_sample(p8p_audio_t *audio) {
+    advance_sequencer(audio);
+    for (int index = 0; index < 4; ++index) {
+        p8p_audio_channel_t *channel = &audio->channels[index];
+        p8p_audio_extra_t *extra = &audio->extra[index];
+        if (channel->sfx < 0)
+            continue;
+        if (channel->sample_in_note == 0)
+            parent_note_started(audio, index);
+        if (extra->parent_custom && extra->instrument.sfx >= 0)
+            voice_step(audio, &extra->instrument);
+        voice_step(audio, channel);
+    }
+    if (audio->pcm_count) {
+        uint32_t next_phase = audio->pcm_phase + P8P_PCM_STEP;
+        if (next_phase < audio->pcm_phase) {
+            audio->pcm_read = (audio->pcm_read + 1) % P8P_PCM_CAPACITY;
+            --audio->pcm_count;
+        }
+        audio->pcm_phase = next_phase;
+    }
+}
+
+/* count samples of voice_step() that cannot end the note. */
+static void bulk_step(p8p_audio_channel_t *voice, uint32_t count) {
+    voice->increment = (int32_t)((uint32_t)voice->increment +
+                                 (uint32_t)voice->increment_step * count);
+    voice->volume_q16 = (int32_t)((uint32_t)voice->volume_q16 +
+                                  (uint32_t)voice->volume_step * count);
+    voice->sample_in_note += count;
+}
+
+/* Samples of a voice that can be bulk-stepped (0: step it singly). */
+static uint32_t bulk_room(const p8p_audio_channel_t *voice) {
+    if (voice->sample_in_note == 0 ||
+        voice->sample_in_note + 1 >= voice->note_samples)
+        return 0;
+    return voice->note_samples - voice->sample_in_note - 1;
+}
+
+/* silent_sample() samples times, in one step wherever no note, pattern,
+ * fade or PCM boundary falls in between. */
+static void advance_silently(p8p_audio_t *audio, uint32_t samples) {
+    while (samples) {
+        uint32_t chunk = samples;
+        if (audio->music_fade_step)
+            chunk = 0;
+        if (audio->music_pattern >= 0 &&
+            audio->music_samples_remaining < chunk)
+            chunk = audio->music_samples_remaining;
+        for (int index = 0; index < 4 && chunk; ++index) {
+            const p8p_audio_channel_t *channel = &audio->channels[index];
+            const p8p_audio_extra_t *extra = &audio->extra[index];
+            uint32_t room;
+            if (channel->sfx < 0)
+                continue;
+            room = bulk_room(channel);
+            if (room < chunk) chunk = room;
+            if (extra->parent_custom && extra->instrument.sfx >= 0) {
+                room = bulk_room(&extra->instrument);
+                if (room < chunk) chunk = room;
+            }
+        }
+        if (audio->pcm_count && chunk) {
+            /* Stop short of the sample whose phase wraps. */
+            uint64_t to_wrap = ((1ull << 32) - audio->pcm_phase +
+                                P8P_PCM_STEP - 1) / P8P_PCM_STEP;
+            if (to_wrap - 1 < chunk)
+                chunk = (uint32_t)(to_wrap - 1);
+        }
+        if (!chunk) {
+            silent_sample(audio);
+            --samples;
+            continue;
+        }
+        if (audio->music_pattern >= 0)
+            audio->music_samples_remaining -= chunk;
+        for (int index = 0; index < 4; ++index) {
+            p8p_audio_channel_t *channel = &audio->channels[index];
+            p8p_audio_extra_t *extra = &audio->extra[index];
+            if (channel->sfx < 0)
+                continue;
+            if (extra->parent_custom && extra->instrument.sfx >= 0)
+                bulk_step(&extra->instrument, chunk);
+            bulk_step(channel, chunk);
+        }
+        if (audio->pcm_count)
+            audio->pcm_phase += P8P_PCM_STEP * chunk;
+        samples -= chunk;
+    }
+}
+
+void p8p_audio_skip(p8p_audio_t *audio, size_t frames) {
+    size_t samples;
+    if (!audio || !audio->ram)
+        return;
+    /* Output frames come in pairs per synthesized sample (render()). */
+    samples = (frames + (audio->second_output ? 0u : 1u)) / 2u;
+    if (frames & 1u)
+        audio->second_output ^= 1;
+    audio->held_sample = 0;
+    while (samples) {
+        uint32_t part = samples > 0x40000000u ? 0x40000000u : (uint32_t)samples;
+        advance_silently(audio, part);
+        samples -= part;
+    }
 }
 
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames) {

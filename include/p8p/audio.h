@@ -22,6 +22,9 @@ int p8p_audio_music_pattern(const p8p_audio_t *audio);
 int p8p_audio_music_count(const p8p_audio_t *audio);
 int p8p_audio_music_ticks(const p8p_audio_t *audio);
 void p8p_audio_render(p8p_audio_t *audio, int16_t *stereo, size_t frames);
+/* Advance music, notes and PCM by frames output frames without
+ * synthesizing them (muted output). */
+void p8p_audio_skip(p8p_audio_t *audio, size_t frames);
 /* PCM output channel (serial 0x808): 8-bit unsigned samples at 5512.5 Hz.
  * Returns how many bytes were queued; the rest did not fit. */
 int p8p_audio_pcm_push(p8p_audio_t *audio, const uint8_t *samples, int count);

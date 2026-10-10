@@ -6,6 +6,12 @@
   but Yarn calls it while drawing its score panel once all levels are
   unlocked, which stopped the cart with "attempt to call global 'exit'". Carts
   that define their own `exit` (Snail) keep theirs; save states are unaffected.
+- Muting audio in the system menu skips synthesizing it: music, notes,
+  effects envelopes, fades and `serial()` PCM keep advancing exactly as they
+  would audibly (`stat()` and music timing are unchanged, verified against
+  normal rendering on 69 carts), but no samples are generated. Muting now
+  frees the audio share of every frame (A in the profiler, 3-5 ms in Celeste
+  2); before, it rendered everything and then multiplied it by zero.
 - The PICO-8 platform shows a PICO-8 banner in the Pocket's platform list
   (`Platforms/_images/pico8.bin`, generated from
   `assets/branding/pico8-platform.png` by `scripts/platform-image.py`).

@@ -3314,6 +3314,10 @@ extern "C" void p8p_runtime_audio_render(p8p_runtime_t *runtime,
     p8p_audio_render(runtime ? runtime->audio : NULL, stereo, frames);
 }
 
+extern "C" void p8p_runtime_audio_skip(p8p_runtime_t *runtime, size_t frames) {
+    p8p_audio_skip(runtime ? runtime->audio : NULL, frames);
+}
+
 extern "C" const char *p8p_runtime_menu_item(const p8p_runtime_t *runtime,
                                               int slot) {
     if (!runtime || slot < 1 || slot > 5 || !runtime->menu_labels[slot - 1][0])
