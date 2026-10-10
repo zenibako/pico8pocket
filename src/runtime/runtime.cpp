@@ -830,6 +830,21 @@ static void __attribute__((noinline)) draw_rect_pattern(
     runtime->screen_ram_dirty = 1;
 }
 
+/* Solid span fill for shapes that clip once up front: four pixels per
+ * store between unaligned ends, without a call per row. */
+static inline void fill_solid_span(uint8_t *row_pixels, int x0, int x1,
+                                   uint8_t color) {
+    int x = x0;
+    for (; x <= x1 && (x & 3); ++x)
+        row_pixels[x] = color;
+    uint32_t word = color * 0x01010101u;
+    uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels, 4);
+    for (; x + 3 <= x1; x += 4)
+        memcpy(aligned + x, &word, 4);
+    for (; x <= x1; ++x)
+        row_pixels[x] = color;
+}
+
 static P8P_FASTTEXT void draw_hspan(p8p_runtime_t *runtime, int x0, int x1,
                                     int y, int color) {
     x0 -= runtime->camera_x;
@@ -958,8 +973,24 @@ static int api_rectfill(lua_State *lua) {
                           color);
         return 0;
     }
-    for (int y = y0; y <= y1; ++y)
-        draw_hspan(runtime, x0, x1, y, color);
+    /* Solid fill: the same clipping once for the whole rectangle. */
+    int screen_x0 = x0 - runtime->camera_x;
+    int screen_x1 = x1 - runtime->camera_x;
+    if (screen_x0 > screen_x1) {
+        int temporary = screen_x0;
+        screen_x0 = screen_x1;
+        screen_x1 = temporary;
+    }
+    if (screen_x0 < runtime->clip_x0) screen_x0 = runtime->clip_x0;
+    if (screen_x1 >= runtime->clip_x1) screen_x1 = runtime->clip_x1 - 1;
+    if (screen_x0 > screen_x1)
+        return 0;
+    uint8_t mapped = runtime->draw_palette[color & 15] & 15;
+    uint8_t *row = runtime->framebuffer +
+                   (y0 - runtime->camera_y) * 128;
+    for (int y = y0; y <= y1; ++y, row += 128)
+        fill_solid_span(row, screen_x0, screen_x1, mapped);
+    runtime->screen_ram_dirty = 1;
     return 0;
 }
 
@@ -987,15 +1018,44 @@ static int api_circfill(lua_State *lua) {
     int color = arg_pen(lua, 4, runtime);
     if (radius < 0)
         return 0;
+    /* Work in screen coordinates and clip once: circles are often mostly
+     * off screen or behind clip(), and a draw_hspan call per row (about
+     * 110 circles a frame in Celeste 2) cost more than the filling. */
+    int sx = cx - runtime->camera_x;
+    int sy = cy - runtime->camera_y;
+    int clip_x0 = runtime->clip_x0, clip_x1 = runtime->clip_x1 - 1;
+    int clip_y0 = runtime->clip_y0, clip_y1 = runtime->clip_y1 - 1;
+    if (sx + radius < clip_x0 || sx - radius > clip_x1 ||
+        sy + radius < clip_y0 || sy - radius > clip_y1 ||
+        clip_x0 > clip_x1 || clip_y0 > clip_y1)
+        return 0;
+    uint8_t mapped = runtime->draw_palette[color & 15] & 15;
+    int patterned = runtime->fill_pattern != 0;
     int extent = radius;
     int radius_squared = radius * radius;
-    for (int offset_y = 0; offset_y <= radius; ++offset_y) {
+    /* Past this offset both rows are outside the clip rectangle. */
+    int last_offset = sy - clip_y0 > clip_y1 - sy ? sy - clip_y0 : clip_y1 - sy;
+    if (last_offset > radius) last_offset = radius;
+    for (int offset_y = 0; offset_y <= last_offset; ++offset_y) {
         while (extent * extent + offset_y * offset_y > radius_squared)
             --extent;
-        draw_hspan(runtime, cx - extent, cx + extent, cy - offset_y, color);
-        if (offset_y)
-            draw_hspan(runtime, cx - extent, cx + extent, cy + offset_y, color);
+        int x0 = sx - extent < clip_x0 ? clip_x0 : sx - extent;
+        int x1 = sx + extent > clip_x1 ? clip_x1 : sx + extent;
+        if (x0 > x1)
+            continue;
+        for (int side = 0; side < (offset_y ? 2 : 1); ++side) {
+            int y = side ? sy + offset_y : sy - offset_y;
+            if (y < clip_y0 || y > clip_y1)
+                continue;
+            uint8_t *row = runtime->framebuffer + y * 128;
+            if (patterned)
+                fill_pattern_span(row, x0, x1,
+                                  fill_pattern_row(runtime, y, color));
+            else
+                fill_solid_span(row, x0, x1, mapped);
+        }
     }
+    runtime->screen_ram_dirty = 1;
     return 0;
 }
 
