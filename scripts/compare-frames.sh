@@ -16,6 +16,10 @@
 # tables in address order and change their frames when only the binary's
 # layout changes; check such DIFFs by padding static data or diffing the
 # frame where they diverge before calling them regressions.
+#
+# diff exits 1 when any cart differs, and 2 when a scanner cannot run.  A
+# cart that errors is compared like any other output: the same error at the
+# same frame in both builds counts as "same".
 set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FRAMES="${FRAMES:-1500}"
@@ -42,9 +46,23 @@ build)
 diff)
     old="$2"; new="$3"; shift 3
     same=0; differ=0
+    # Scanner exit codes 0, 3 (load error) and 4 (runtime error) are results
+    # to compare; anything else (missing binary, setarch failure, bad cart
+    # path) means the run itself failed.
+    scan() {
+        local output status=0
+        output="$(P8P_EVERY_FRAME=1 setarch -R "$1" "$2" "$FRAMES" 1 2>&1)" ||
+            status=$?
+        case "$status" in
+        0|3|4) ;;
+        *) echo "scan error: $1 $2 exited $status: ${output:0:200}" >&2
+           exit 2 ;;
+        esac
+        printf '%s\nexit=%s\n' "$output" "$status" | grep -v 'avg=' || true
+    }
     for cart in "$@"; do
-        a="$(P8P_EVERY_FRAME=1 setarch -R "$old" "$cart" "$FRAMES" 1 2>&1 | grep -v 'avg=' || true)"
-        b="$(P8P_EVERY_FRAME=1 setarch -R "$new" "$cart" "$FRAMES" 1 2>&1 | grep -v 'avg=' || true)"
+        a="$(scan "$old" "$cart")"
+        b="$(scan "$new" "$cart")"
         if [[ "$a" == "$b" ]]; then
             same=$((same + 1))
         else
@@ -54,6 +72,7 @@ diff)
         fi
     done
     echo "same=$same differ=$differ"
+    [[ "$differ" -eq 0 ]] || exit 1
     ;;
 *)
     sed -n '2,19p' "$0" >&2

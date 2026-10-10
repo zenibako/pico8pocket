@@ -71,8 +71,9 @@ scripts/variant-core.sh releases/pico8pocket-v<VER>.zip b "Test build B" b.zip
 - Commit messages end with the Co-Authored-By and Claude-Session lines. No
   model identifiers in commits or PRs.
 - CodeRabbit reviews PRs against `main` automatically:
-  - The free plan allows about one review per hour; a rate-limited PR says
-    when the next is available.
+  - reviews are rate-limited (its review notes on this repo report one per
+    hour); a rate-limited PR says when the next is available, so wait until
+    then and comment `@coderabbitai review` if it has not started.
   - It never reviews closed or merged PRs.
   - For a PR whose base isn't `main`, comment `@coderabbitai full review`.
   - To review already-merged work, push a branch at the old base and open a

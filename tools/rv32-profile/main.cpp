@@ -21,8 +21,10 @@ int main() {
     p8p_runtime_t *rt = p8p_runtime_create();
     if (p8p_runtime_load(rt, &cart)) { puts(p8p_runtime_error(rt)); return 3; }
     int value = 0;
-    if (SETUP[0] && p8p_runtime_debug_eval_int(rt, SETUP, &value))
+    if (SETUP[0] && p8p_runtime_debug_eval_int(rt, SETUP, &value)) {
         puts("setup expression failed");
+        return 4;
+    }
     for (int f = 0; f < WARM; ++f) p8p_runtime_step(rt, 0);
     sim_marker(1);
     for (int f = 0; f < FRAMES; ++f) p8p_runtime_step(rt, 0);

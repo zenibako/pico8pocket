@@ -20,8 +20,10 @@ static uint32_t nsym; static struct { uint32_t a, s; char name[96]; uint64_t mis
 static int symof(uint32_t a) { int lo = 0, hi = (int)nsym - 1, r = -1; while (lo <= hi) { int m = (lo + hi) / 2; if (sym[m].a <= a) { r = m; lo = m + 1; } else hi = m - 1; } if (r >= 0 && a < sym[r].a + sym[r].s) return r; return -1; }
 int main(int argc, char **argv) {
   uint32_t marker = strtoul(argv[1], 0, 16), blo = strtoul(argv[2], 0, 16), bhi = strtoul(argv[3], 0, 16);
-  FILE *sf = fopen(argv[4], "r"); sym = calloc(200000, sizeof *sym);
-  while (fscanf(sf, "%x %x %95s", &sym[nsym].a, &sym[nsym].s, sym[nsym].name) == 3) ++nsym;
+  FILE *sf = fopen(argv[4], "r");
+  if (!sf) { perror(argv[4]); return 1; }
+  sym = calloc(200000, sizeof *sym);
+  while (nsym < 200000 && fscanf(sf, "%x %x %95s", &sym[nsym].a, &sym[nsym].s, sym[nsym].name) == 3) ++nsym;
   tbs = calloc(MAXTB, sizeof *tbs);
   if (argc > 6) { pcnt_lo = strtoul(argv[5], 0, 16); pcnt_hi = strtoul(argv[6], 0, 16); pcnt = calloc((pcnt_hi - pcnt_lo) / 2 + 1, 8); }
   static char line[4096]; static uint32_t cur[4096]; uint32_t ncur = 0, curpc = 0; int inblk = 0, phase = 0;
@@ -54,6 +56,6 @@ int main(int argc, char **argv) {
   printf("fetches %llu (bram %llu) line-changes %llu\n", (unsigned long long)fetch, (unsigned long long)bramfetch, (unsigned long long)lines);
   for (int c = 0; c < NCFG; ++c) printf("%d-way misses %llu\n", ways[c], (unsigned long long)miss[c]);
   for (uint32_t i = 0; i < nsym; ++i) if (sym[i].fetch * 1000 > fetch) printf("%10llu fetch %6u B %s\n", (unsigned long long)sym[i].fetch, sym[i].s, sym[i].name);
-  if (pcnt) { FILE *o = fopen("pcnt.txt", "w"); for (uint32_t a = pcnt_lo; a < pcnt_hi; a += 2) if (pcnt[(a - pcnt_lo) >> 1]) fprintf(o, "%x %llu\n", a, (unsigned long long)pcnt[(a - pcnt_lo) >> 1]); fclose(o); }
+  if (pcnt) { FILE *o = fopen("pcnt.txt", "w"); if (!o) { perror("pcnt.txt"); return 1; } for (uint32_t a = pcnt_lo; a < pcnt_hi; a += 2) if (pcnt[(a - pcnt_lo) >> 1]) fprintf(o, "%x %llu\n", a, (unsigned long long)pcnt[(a - pcnt_lo) >> 1]); fclose(o); }
   return 0;
 }
