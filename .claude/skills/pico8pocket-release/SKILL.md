@@ -14,6 +14,10 @@ description: Build, package and hand Pico8Pocket test builds to the user for Ana
 - Copy the zip to the repo root under a descriptive name, for example
   `pico8-zenibako-v0.0.33-<topic>.zip` (`*.zip` is gitignored), and send it
   with SendUserFile. The user tests every change on a real Pocket.
+- The OS runtime comes from the Diablo port's release that
+  `scripts/fetch-deps.sh` pins (1.1.0, the newest Pocket runtime as of
+  2026-10-11). The openfpgaOS repo itself publishes no Pocket binaries, so
+  check openfpgaSDK and Diablo releases when asked whether to upgrade.
 - Public zips never contain carts. `make package-local` bundles local carts
   and is for private use only.
 
@@ -49,7 +53,28 @@ scripts/variant-core.sh releases/pico8pocket-v<VER>.zip b "Test build B" b.zip
   Same-named game entries in two core folders made one disappear when the
   user copied files, so keep names unique.
 - Name the variants A and B, say exactly what differs, and ask for the same
-  scene's overlay from each.
+  scene's overlay from each. One screenshot can catch a spike, so don't
+  call a regression from a single device overlay; ask for the A/B pair.
+- To install both from a Mac (the files the two zips share are identical,
+  so order doesn't matter):
+  ```sh
+  unzip -o pico8-zenibako-<VER>-A-<topic>.zip -d /Volumes/Pocket
+  unzip -o pico8-zenibako-<VER>-B-<topic>.zip -d /Volumes/Pocket
+  dot_clean -m /Volumes/Pocket/Assets /Volumes/Pocket/Cores /Volumes/Pocket/Platforms
+  diskutil unmount /Volumes/Pocket
+  ```
+  If the unmount is "dissented by" a `com.apple.Virtualization` process,
+  the Claude desktop app has the card open for a session that read it;
+  once the copy is done, `diskutil unmount force /Volumes/Pocket` is safe.
+
+## Checking what is on a card
+
+`core.json` carries the same version for every build of a release, so it
+can't tell builds apart. Compare each core's elf with the same-named elf
+in its candidate zip (`unzip -p ZIP Assets/pico8/common/NAME.elf | cmp -
+/Volumes/Pocket/Assets/pico8/common/NAME.elf`): `pico8pocket.elf` for the
+main core and `pico8pocketb.elf` for B, which `scripts/variant-core.sh`
+renames. `Cores/zenibako.pico8b` only shows that some B core is installed.
 
 ## Platform banner
 
@@ -66,6 +91,11 @@ scripts/variant-core.sh releases/pico8pocket-v<VER>.zip b "Test build B" b.zip
 - Develop on the session's designated branch. After its PR merges, restart
   the branch from `origin/main`. The user may also ask for a new branch per
   change.
+- Check that a PR is still open before pushing to its branch. The user
+  merges on their own schedule, and commits pushed after the merge never
+  reach `main`; put them on a new branch from `main` instead.
+- To bring an open branch up to date, merge `main` into it rather than
+  rebasing, since rebasing a pushed branch needs a force-push.
 - Pushes to GitHub sometimes fail with "Internal Server Error". Retry in a
   loop with a pause; never force-push.
 - Commit messages end with the Co-Authored-By and Claude-Session lines. No
