@@ -1,0 +1,95 @@
+Pico8Pocket: cheaper Lua calls.  OP_CALL sets up a Lua callee's frame inline
+when it needs neither varargs nor stack growth, and OP_RETURN hands results
+back to a Lua caller inline, skipping luaD_precall/luaD_poscall.  Light C
+functions reached by a tail call (`return peek(...)`) or as a generic-for
+iterator (`next` from pairs, ipairs) go through luaD_callcfast like
+OP_CALL's.  All of these fall back to the original paths when call, return
+or line hooks are set.
+
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -1027,6 +1027,30 @@
+           if (nresults >= 0) L->top = ci->top;  /* adjust results */
+           base = ci->u.l.base;
+         }
++        else if (ttisLclosure(ra) && !(L->hookmask & LUA_MASKCALL) &&
++                 !clLvalue(ra)->p->is_vararg &&
++                 L->stack_last - L->top > clLvalue(ra)->p->maxstacksize) {
++          /* Pico8Pocket: the Lua half of luaD_precall, inline.  No stack
++             growth or varargs to handle, so nothing can move the stack
++             before the new frame is set up. */
++          Proto *p = clLvalue(ra)->p;
++          StkId nbase = ra + 1;
++          int n = cast_int(L->top - nbase);  /* number of real arguments */
++          CallInfo *nci;
++          for (; n < p->numparams; n++)
++            setnilvalue(L->top++);  /* complete missing arguments */
++          nci = L->ci = (ci->next ? ci->next : luaE_extendCI(L));
++          nci->nresults = nresults;
++          nci->func = ra;
++          nci->u.l.base = nbase;
++          nci->top = nbase + p->maxstacksize;
++          nci->u.l.savedpc = p->code;
++          nci->callstatus = CIST_LUA | CIST_REENTRY;
++          L->top = nci->top;
++          ci = nci;
++          luaC_checkGC(L);  /* as luaD_precall: stack grow uses memory */
++          goto newframe;  /* restart luaV_execute over new Lua function */
++        }
+         else if (luaD_precall(L, ra, nresults)) {  /* C function? */
+           if (nresults >= 0) L->top = ci->top;  /* adjust results */
+           base = ci->u.l.base;
+@@ -1043,7 +1067,13 @@
+         int b = GETARG_B(i);
+         if (b != 0) L->top = ra+b;  /* else previous instruction set top */
+         lua_assert(GETARG_C(i) - 1 == LUA_MULTRET);
+-        if (luaD_precall(L, ra, LUA_MULTRET))  /* C function? */
++        if (ttislcf(ra) &&
++            !(L->hookmask & (LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE))) {
++          /* Pico8Pocket: `return peek(...)' and the like, as in OP_CALL */
++          luaD_callcfast(L, ra, LUA_MULTRET);
++          base = ci->u.l.base;
++        }
++        else if (luaD_precall(L, ra, LUA_MULTRET))  /* C function? */
+           base = ci->u.l.base;
+         else {
+           /* tail call: put called frame (n) in place of caller one (o) */
+@@ -1072,6 +1102,20 @@
+         int b = GETARG_B(i);
+         if (b != 0) L->top = ra+b-1;
+         if (cl->p->sizep > 0) luaF_close(L, base);
++        if ((ci->callstatus & CIST_REENTRY) &&
++            !(L->hookmask & (LUA_MASKRET | LUA_MASKLINE))) {
++          /* Pico8Pocket: luaD_poscall back into a Lua caller, inline */
++          StkId res = ci->func;  /* final position of 1st result */
++          int wanted = ci->nresults;
++          ci = L->ci = ci->previous;  /* back to caller */
++          for (b = wanted; b != 0 && ra < L->top; b--)
++            setobjs2s(L, res++, ra++);
++          while (b-- > 0)
++            setnilvalue(res++);
++          L->top = (wanted != LUA_MULTRET) ? ci->top : res;
++          lua_assert(isLua(ci));
++          goto newframe;  /* restart luaV_execute over new Lua function */
++        }
+         b = luaD_poscall(L, ra);
+         if (!(ci->callstatus & CIST_REENTRY))  /* 'ci' still the called one */
+           return;  /* external invocation: return */
+@@ -1118,7 +1162,15 @@
+         setobjs2s(L, cb+1, ra+1);
+         setobjs2s(L, cb, ra);
+         L->top = cb + 3;  /* func. + 2 args (state and index) */
+-        Protect(luaD_call(L, cb, GETARG_C(i), 1));
++        if (ttislcf(cb) &&
++            !(L->hookmask & (LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE))) {
++          /* Pico8Pocket: light C iterators (next, ipairs), as in OP_CALL */
++          savepc();
++          luaD_callcfast(L, cb, GETARG_C(i));
++          base = ci->u.l.base;
++        }
++        else
++          Protect(luaD_call(L, cb, GETARG_C(i), 1));
+         L->top = ci->top;
+         i = *(pc++);  /* go to next instruction */
+         ra = RA(i);
