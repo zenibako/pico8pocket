@@ -2,8 +2,9 @@ Pico8Pocket: cheaper Lua calls.  OP_CALL sets up a Lua callee's frame inline
 when it needs neither varargs nor stack growth, and OP_RETURN hands results
 back to a Lua caller inline, skipping luaD_precall/luaD_poscall.  Light C
 functions reached by a tail call (`return peek(...)`) or as a generic-for
-iterator (all, next) go through luaD_callcfast like OP_CALL's.  All of these
-fall back to the original paths when call, return or line hooks are set.
+iterator (`next` from pairs, ipairs) go through luaD_callcfast like
+OP_CALL's.  All of these fall back to the original paths when call, return
+or line hooks are set.
 
 diff --git a/lvm.c b/lvm.c
 --- a/lvm.c
@@ -82,7 +83,7 @@ diff --git a/lvm.c b/lvm.c
 -        Protect(luaD_call(L, cb, GETARG_C(i), 1));
 +        if (ttislcf(cb) &&
 +            !(L->hookmask & (LUA_MASKCALL | LUA_MASKRET | LUA_MASKLINE))) {
-+          /* Pico8Pocket: C iterators (all, pairs' next), as in OP_CALL */
++          /* Pico8Pocket: light C iterators (next, ipairs), as in OP_CALL */
 +          savepc();
 +          luaD_callcfast(L, cb, GETARG_C(i));
 +          base = ci->u.l.base;

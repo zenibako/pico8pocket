@@ -5,7 +5,7 @@
 - Lua-to-Lua calls set up and tear down their frames inside the
   interpreter loop instead of through `luaD_precall`/`luaD_poscall`, and C
   functions reached by a tail call (`return peek(...)`) or used as a `for ...
-  in` iterator (`all`, `pairs`) take the same fast path as ordinary API
+  in` iterator (`pairs`, `ipairs`) take the same fast path as ordinary API
   calls. A Lua call costs about 15% less on the Pocket's CPU; whole frames
   run 1-3% faster (Celeste 2, Kiloman, Moss Moss, Grippy). Frames are
   identical on all 68 local carts; hooks, errors and coroutines behave as
