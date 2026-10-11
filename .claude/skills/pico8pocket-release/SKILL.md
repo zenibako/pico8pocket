@@ -70,10 +70,11 @@ scripts/variant-core.sh releases/pico8pocket-v<VER>.zip b "Test build B" b.zip
 ## Checking what is on a card
 
 `core.json` carries the same version for every build of a release, so it
-can't tell builds apart. `cmp` the card's
-`Assets/pico8/common/pico8pocket.elf` against the elf in each candidate
-zip, and look for `Cores/zenibako.pico8b` to see whether a B build is
-installed.
+can't tell builds apart. Compare each core's elf with the same-named elf
+in its candidate zip (`unzip -p ZIP Assets/pico8/common/NAME.elf | cmp -
+/Volumes/Pocket/Assets/pico8/common/NAME.elf`): `pico8pocket.elf` for the
+main core and `pico8pocketb.elf` for B, which `scripts/variant-core.sh`
+renames. `Cores/zenibako.pico8b` only shows that some B core is installed.
 
 ## Platform banner
 
