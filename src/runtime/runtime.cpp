@@ -140,6 +140,8 @@ static const uint8_t runtime_state_magic[8] = {
 
 static_assert(offsetof(p8p_runtime, ram) % 4 == 0,
               "screen packing uses word access to RAM");
+static_assert(offsetof(p8p_runtime, draw_palette) % 4 == 0,
+              "palette identity uses aligned word loads");
 static_assert(offsetof(p8p_runtime, framebuffer) % 4 == 0,
               "screen packing uses word access to the framebuffer");
 
@@ -1353,6 +1355,23 @@ static int api_fset(lua_State *lua) {
     return 0;
 }
 
+static inline int draw_palette_is_identity(const p8p_runtime_t *runtime) {
+    static const uint8_t identity_bytes[16] = {
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
+    };
+    uint32_t colors[4], identity[4];
+    /* memcpy keeps the word comparisons alias-safe and endian-independent. */
+    const uint8_t *palette = (const uint8_t *)__builtin_assume_aligned(
+        runtime->draw_palette, 4);
+    memcpy(&colors[0], palette, 4);
+    memcpy(&colors[1], palette + 4, 4);
+    memcpy(&colors[2], palette + 8, 4);
+    memcpy(&colors[3], palette + 12, 4);
+    memcpy(identity, identity_bytes, sizeof(identity));
+    return colors[0] == identity[0] && colors[1] == identity[1] &&
+           colors[2] == identity[2] && colors[3] == identity[3];
+}
+
 /* map() spends most of its time dispatching hundreds of ordinary 8x8 tiles.
  * Keep that hot path separate from the fully general scaled/flipped sprite
  * renderer so it does not rebuild the same width, height and camera state for
@@ -1373,7 +1392,8 @@ static P8P_FASTTEXT void blit_tile(p8p_runtime_t *runtime, int sprite,
 
     int source_x = (sprite & 15) * 8;
     int source_y = (sprite >> 4) * 8;
-    int default_colors = runtime->palettes_default &&
+    int default_colors = (runtime->palettes_default ||
+                          draw_palette_is_identity(runtime)) &&
                          runtime->transparency_default;
     runtime->screen_ram_dirty = 1;
     for (int y = start_y; y < end_y; ++y) {
@@ -1521,7 +1541,7 @@ static void reset_transparency(p8p_runtime_t *runtime) {
     runtime->transparency_default = 1;
 }
 
-static int api_pal(lua_State *lua) {
+static __attribute__((noinline)) int api_pal_full(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (arg_count(lua) == 0) {
@@ -1571,6 +1591,16 @@ static int api_pal(lua_State *lua) {
         return 1;
     }
     return 0;
+}
+
+/* Frequent pal() calls already have nothing to reset. Keep their leaf path
+ * in BRAM, while mutations and profiling retain the complete implementation. */
+static P8P_FASTTEXT int api_pal(lua_State *lua) {
+    p8p_runtime_t *runtime = active_runtime;
+    if (arg_count(lua) == 0 && runtime->palettes_default &&
+        runtime->transparency_default && !runtime->profile_hook)
+        return 0;
+    return api_pal_full(lua);
 }
 
 static int api_palt(lua_State *lua) {
