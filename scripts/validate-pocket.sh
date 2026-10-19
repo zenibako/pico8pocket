@@ -164,11 +164,18 @@ else
 fi
 
 for notice in LICENSE.txt THIRD_PARTY_NOTICES.txt openfpgaOS-SDK-LICENSE.txt \
-    openfpgaOS-SDK-NOTICE.txt Fake-08-LICENSE.txt; do
+    openfpgaOS-SDK-NOTICE.txt Fake-08-LICENSE.txt miniz-LICENSE.txt \
+    z8lua-LICENSE-SOURCE.txt Eris-LICENSE.txt openfpgaCore-NOTICE.txt; do
     [[ -s "$CORE_DIR/$notice" ]] || {
         echo "Missing release notice: $notice" >&2
         exit 1
     }
 done
+
+if [[ ! -d "$CORE_DIR/runtime-licenses" ]] || \
+   [[ -z "$(find "$CORE_DIR/runtime-licenses" -type f -size +0c -print -quit)" ]]; then
+    echo "Missing runtime license texts" >&2
+    exit 1
+fi
 
 echo "APF package validation passed: $CORE_ID on $PLATFORM_ID"

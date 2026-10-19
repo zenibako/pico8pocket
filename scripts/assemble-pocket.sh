@@ -5,6 +5,7 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_ROOT="${SDK_ROOT:-$PROJECT_ROOT/.deps/openfpgaos-sdk}"
 SDK_NOTICE_ROOT="$PROJECT_ROOT/.deps/openfgpaSDK"
 FAKE08_ROOT="$PROJECT_ROOT/.deps/fake-08"
+FORK_NOTICE_ROOT="$PROJECT_ROOT/.deps/openfpgaCore"
 OUT="$PROJECT_ROOT/build/pocket/pico8pocket"
 BUNDLE_LOCAL_CARTS="${BUNDLE_LOCAL_CARTS:-0}"
 CORE_JSON="$PROJECT_ROOT/dist/core/core.json"
@@ -56,6 +57,12 @@ cp "$PROJECT_ROOT/THIRD_PARTY_NOTICES.md" "$CORE_DIR/THIRD_PARTY_NOTICES.txt"
 cp "$SDK_NOTICE_ROOT/LICENSE" "$CORE_DIR/openfpgaOS-SDK-LICENSE.txt"
 cp "$SDK_NOTICE_ROOT/NOTICE" "$CORE_DIR/openfpgaOS-SDK-NOTICE.txt"
 cp "$FAKE08_ROOT/LICENSE.MD" "$CORE_DIR/Fake-08-LICENSE.txt"
+cp "$FAKE08_ROOT/libs/miniz/LICENSE" "$CORE_DIR/miniz-LICENSE.txt"
+cp "$FAKE08_ROOT/libs/z8lua/lua.h" "$CORE_DIR/z8lua-LICENSE-SOURCE.txt"
+awk '{ print } /^\*\// { exit }' \
+    "$FAKE08_ROOT/libs/z8lua/eris.c" > "$CORE_DIR/Eris-LICENSE.txt"
+cp "$FORK_NOTICE_ROOT/NOTICE" "$CORE_DIR/openfpgaCore-NOTICE.txt"
+cp -R "$FORK_NOTICE_ROOT/LICENSES" "$CORE_DIR/runtime-licenses"
 
 cart_count=0
 if [[ "$BUNDLE_LOCAL_CARTS" == "1" ]]; then

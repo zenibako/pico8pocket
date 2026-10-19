@@ -23,7 +23,7 @@ DIABLO_PATHS=(src/sdk tools)
 # headers replace Diablo's; the rest of Diablo's SDK is unchanged by the fork.
 FORK_URL="https://github.com/zenibako/openfpgaCore.git"
 FORK_COMMIT="a58aacd940c1b433c030b97f8207d2c7e03307c8"
-FORK_PATHS=(src/firmware/api)
+FORK_PATHS=(src/firmware/api NOTICE LICENSES)
 # Pocket runtime published from that commit. The loader, OS and bitstream
 # must come from the same build: the bitstream contains the OS's .fasttext
 # and bootloader BRAM image as well as the FPGA logic.
@@ -97,6 +97,11 @@ fetch_sparse() {
             echo "$name is at $current, expected $commit" >&2
             echo "Move $destination aside and run make deps again." >&2
             return 1
+        fi
+        # Expand cached sparse checkouts when packaging needs additional files
+        # from the same pin. Adding paths preserves previously selected files.
+        if [[ "$(git -C "$destination" config --bool core.sparseCheckout || true)" == true ]]; then
+            git -C "$destination" sparse-checkout add "$@"
         fi
         echo "$name: pinned revision already present"
         return 0

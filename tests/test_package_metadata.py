@@ -36,6 +36,11 @@ class PackageMetadataTests(unittest.TestCase):
             '.deps/openfgpaSDK/LICENSE': b'SDK license fixture',
             '.deps/openfgpaSDK/NOTICE': b'SDK notice fixture',
             '.deps/fake-08/LICENSE.MD': b'Fake-08 license fixture',
+            '.deps/fake-08/libs/miniz/LICENSE': b'miniz license fixture',
+            '.deps/fake-08/libs/z8lua/lua.h': b'Lua header and copyright fixture',
+            '.deps/fake-08/libs/z8lua/eris.c': b'/*\nEris copyright fixture\n*/\n\nint private_implementation;\n',
+            '.deps/openfpgaCore/NOTICE': b'pinned runtime notice fixture',
+            '.deps/openfpgaCore/LICENSES/MIT-0.txt': b'pinned runtime license fixture',
         }
         for name, data in files.items():
             path = root / name
@@ -60,6 +65,37 @@ class PackageMetadataTests(unittest.TestCase):
         """Keep the public AI declaration where catalog updaters read it."""
         path = self.tree / 'Cores/zenibako.pico8/updaters.json'
         self.assertEqual(json.loads(path.read_text())['declare_ai'], ['OpenAI Codex', 'Claude Code'])
+
+    def test_dependency_notices_survive_assembly(self):
+        """Retain the dependency notices already shipped in v0.0.34."""
+        core = self.tree / 'Cores/zenibako.pico8'
+        expected = {
+            'miniz-LICENSE.txt': b'miniz license fixture',
+            'z8lua-LICENSE-SOURCE.txt': b'Lua header and copyright fixture',
+            'Eris-LICENSE.txt': b'/*\nEris copyright fixture\n*/\n',
+            'openfpgaCore-NOTICE.txt': b'pinned runtime notice fixture',
+            'runtime-licenses/MIT-0.txt': b'pinned runtime license fixture',
+        }
+        for name, contents in expected.items():
+            with self.subTest(notice=name):
+                self.assertTrue((core / name).is_file(), f'missing packaged notice: {name}')
+                self.assertEqual((core / name).read_bytes(), contents)
+
+    def test_validation_rejects_missing_dependency_notice(self):
+        """Reject a package after a required dependency notice is removed."""
+        (self.tree / 'Cores/zenibako.pico8/Eris-LICENSE.txt').unlink(missing_ok=True)
+        result = subprocess.run(['bash', str(ROOT / 'scripts/validate-pocket.sh'), str(self.tree)],
+                                env=dict(os.environ, BUNDLE_LOCAL_CARTS='0'), capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Missing release notice: Eris-LICENSE.txt', result.stderr)
+
+    def test_validation_rejects_missing_runtime_licenses(self):
+        """Reject an otherwise complete package without runtime license texts."""
+        shutil.rmtree(self.tree / 'Cores/zenibako.pico8/runtime-licenses', ignore_errors=True)
+        result = subprocess.run(['bash', str(ROOT / 'scripts/validate-pocket.sh'), str(self.tree)],
+                                env=dict(os.environ, BUNDLE_LOCAL_CARTS='0'), capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Missing runtime license texts', result.stderr)
 
     def test_game_association_selects_carts_not_internal_resources(self):
         """Expose real carts to Pocket Sync's first-required-filtered-slot selector."""
