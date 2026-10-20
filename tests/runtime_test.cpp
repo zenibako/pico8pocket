@@ -445,12 +445,98 @@ static void palette_leaf_contracts(void) {
     free(runtime);
 }
 
+/** @brief Compare clipped span drawing with a per-pixel disk/rectangle model.
+ * Short unaligned spans must preserve neighboring pixels even when no aligned
+ * bulk word exists. Check every pattern phase and packed screen-RAM output.
+ */
+static void span_alignment_semantics(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _draw() end\n";
+    static const int widths[] = {1,2,3,4,5,7,8,9,15,31,32,127};
+    static const int radii[] = {-1,0,1,2,3,7,16,63};
+    static const unsigned patterns[] = {0,0xffff,0x5a5a,0x8421};
+    p8p_cart_t cart = {};
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    if (!runtime) return;
+    int loaded = p8p_cart_load_text_memory((const uint8_t *)source,
+                                           sizeof(source)-1, &cart);
+    if (!loaded) loaded = p8p_runtime_load(runtime, &cart);
+    CHECK(loaded == 0);
+    if (loaded) {
+        p8p_runtime_destroy(runtime);
+        p8p_cart_destroy(&cart);
+        return;
+    }
+    int failed = 0;
+    for (int shape=0;shape<2 && !failed;++shape)
+    for (int position=0;position<3 && !failed;++position)
+    for (int phase=0;phase<16 && !failed;++phase)
+    for (int variant=0;variant<8 && !failed;++variant) {
+        unsigned pattern = patterns[variant/2];
+        int transparent = variant & 1;
+        int count = shape ? (int)(sizeof(radii)/sizeof(radii[0])) :
+                            (int)(sizeof(widths)/sizeof(widths[0]));
+        for (int index=0;index<count && !failed;++index) {
+            int x = (position ? 1 : 20) + (phase & 3);
+            int y = (position ? 2 : 20) + (phase >> 2);
+            int width = shape ? 0 : widths[index];
+            int height = 1 + ((phase + index) % 5);
+            int radius = shape ? radii[index] : 0;
+            int clip_x = position == 2 ? 140 : 3;
+            char draw[96], expression[256];
+            if (shape)
+                snprintf(draw,sizeof(draw),"circfill(%d,%d,%d,50)",x-3,y+5,radius);
+            else
+                snprintf(draw,sizeof(draw),"rectfill(%d,%d,%d,%d,50)",
+                         x-3,y+5,x+width-4,y+height+4);
+            int length = snprintf(expression,sizeof(expression),
+                "(function() camera() clip() fillp() pal() cls(6) pal(2,9) pal(3,10) "
+                "camera(-3,5) clip(%d,4,121,119) fillp(0x%04x%s) %s "
+                "return peek(0x6000) end)()",
+                clip_x,pattern,transparent ? ".8" : "",draw);
+            CHECK(length > 0 && length < (int)sizeof(expression));
+            p8p_active_runtime=runtime;
+            int code=luaL_dostring(runtime->lua,expression);
+            CHECK(code == 0);
+            if (code) { failed=1; break; }
+            uint8_t expected[128*128];
+            memset(expected,6,sizeof(expected));
+            for (int py=4;py<123;++py)
+            for (int px=clip_x;px<128 && px<clip_x+121;++px) {
+                int dx=px-x,dy=py-y;
+                int inside = shape ? radius>=0 && dx*dx+dy*dy<=radius*radius :
+                    dx>=0 && dx<width && dy>=0 && dy<height;
+                if (!inside) continue;
+                int bit=(pattern >> (15-4*(py&3)-(px&3))) & 1;
+                if (bit && transparent) continue;
+                expected[py*128+px]=(uint8_t)(bit ? 10 : 9);
+            }
+            int equal=memcmp(p8p_runtime_framebuffer(runtime),expected,sizeof(expected))==0;
+            for (int i=0;i<8192 && equal;++i)
+                equal=runtime->ram[0x6000+i] ==
+                    (uint8_t)(expected[2*i] | (expected[2*i+1]<<4));
+            if (!equal) {
+                fprintf(stderr,"span reference mismatch: shape=%d position=%d phase=%d "
+                        "pattern=%x transparent=%d width=%d height=%d radius=%d\n",
+                        shape,position,phase,pattern,transparent,width,height,radius);
+                CHECK(equal);
+                failed=1;
+            }
+        }
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
 /** @brief Run host runtime contracts and embedded cartridge regression cases.
  * Checks API state and rendered pixel markers, including all(t) traversal
  * through deletion, growth, collection and mixed values. Returns nonzero on
  * failed checks so iterator changes are covered by the normal test target.
  */
 int main(void) {
+    span_alignment_semantics();
     palette_leaf_contracts();
     palette_fast_path_semantics();
     draw_palette_transitions();

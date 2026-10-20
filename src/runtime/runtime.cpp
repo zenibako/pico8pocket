@@ -722,17 +722,21 @@ static inline void fill_pattern_span(uint8_t *row_pixels, int x0, int x1,
     for (; x <= x1 && (x & 3); ++x)
         if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
             row_pixels[x] = (uint8_t)(pattern.fill >> (8 * (x & 3)));
-    uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels, 4);
+    /* Only a bulk iteration guarantees alignment: a short span may end in
+     * the prefix. Describe the actual copy address so GCC can use word I/O. */
     if (pattern.keep) {
         for (; x + 3 <= x1; x += 4) {
+            uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels + x, 4);
             uint32_t word;
-            memcpy(&word, aligned + x, 4);
+            memcpy(&word, aligned, 4);
             word = (word & pattern.keep) | pattern.fill;
-            memcpy(aligned + x, &word, 4);
+            memcpy(aligned, &word, 4);
         }
     } else {
-        for (; x + 3 <= x1; x += 4)
-            memcpy(aligned + x, &pattern.fill, 4);
+        for (; x + 3 <= x1; x += 4) {
+            uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels + x, 4);
+            memcpy(aligned, &pattern.fill, 4);
+        }
     }
     for (; x <= x1; ++x)
         if (!((pattern.keep >> (8 * (x & 3))) & 0xffu))
@@ -767,9 +771,11 @@ static inline void fill_solid_span(uint8_t *row_pixels, int x0, int x1,
     for (; x <= x1 && (x & 3); ++x)
         row_pixels[x] = color;
     uint32_t word = color * 0x01010101u;
-    uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels, 4);
-    for (; x + 3 <= x1; x += 4)
-        memcpy(aligned + x, &word, 4);
+    /* The prefix may consume an unaligned short span before any bulk copy. */
+    for (; x + 3 <= x1; x += 4) {
+        uint8_t *aligned = (uint8_t *)__builtin_assume_aligned(row_pixels + x, 4);
+        memcpy(aligned, &word, 4);
+    }
     for (; x <= x1; ++x)
         row_pixels[x] = color;
 }
