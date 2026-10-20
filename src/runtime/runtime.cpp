@@ -1504,7 +1504,7 @@ extern "C" __attribute__((noinline)) int p8p_api_pal_full(lua_State *lua) {
     return 0;
 }
 
-static int api_palt(lua_State *lua) {
+extern "C" __attribute__((noinline)) int p8p_api_palt_full(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     p8p_runtime_t *runtime = active_runtime;
     if (arg_count(lua) == 0) {
@@ -2662,7 +2662,7 @@ static const luaL_Reg runtime_api[] = {
     {"mget", api_mget}, {"mset", api_mset}, {"map", api_map},
     {"mapdraw", api_map}, {"fget", api_fget}, {"fset", api_fset},
     {"camera", api_camera}, {"clip", api_clip}, {"pal", p8p_api_pal},
-    {"palt", api_palt}, {"btn", api_btn}, {"btnp", api_btnp},
+    {"palt", p8p_api_palt}, {"btn", api_btn}, {"btnp", api_btnp},
     {"peek", api_peek}, {"poke", api_poke}, {"peek2", api_peek2},
     {"poke2", api_poke2}, {"peek4", api_peek4}, {"poke4", api_poke4},
     {"memset", api_memset},

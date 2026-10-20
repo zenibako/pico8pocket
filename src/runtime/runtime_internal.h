@@ -84,5 +84,9 @@ extern p8p_runtime_t *p8p_active_runtime;
 int p8p_api_pal(lua_State *lua);
 int p8p_api_pal_full(lua_State *lua);
 int p8p_draw_palette_identity(const uint8_t *palette);
+/* Skip only argument-free, unprofiled resets of already-default transparency. */
+int p8p_api_palt(lua_State *lua);
+/* Retain argument conversion, RAM synchronization and API profiling on fallback. */
+int p8p_api_palt_full(lua_State *lua);
 }
 #endif

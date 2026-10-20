@@ -341,8 +341,14 @@ static void palette_fast_path_semantics(void) {
         "function _init() assert(select('#',pal())==0) "
         "assert(pal(1,4)==1) assert(pal(1,1)==4) "
         "pal({[1]=8},1) pal() assert(peek(0x5f11)==1) "
-        "palt(0,false) pal() assert(peek(0x5f00)==16) end\n"
+        "palt(0,false) pal() assert(peek(0x5f00)==16) "
+        "palt(nil) assert(peek(0x5f00)==0) "
+        "assert(select('#',palt())==0) assert(peek(0x5f00)==16) "
+        "pal(3,8) palt(3,true) palt() assert(peek(0x5f03)==8) "
+        "poke(0x5f00,7) palt() assert(peek(0x5f00)==23) "
+        "palt(0x8000) assert(peek(0x5f00)==23) pal() end\n"
         "function _draw() pal() assert(select('#',pal())==0) "
+        "palt() assert(select('#',palt())==0) "
         "assert(peek(0x5f00)==16 and peek(0x5f01)==1) end\n";
     p8p_cart_t cart = {};
     p8p_runtime_t *runtime = p8p_runtime_create();
@@ -360,7 +366,7 @@ static void palette_fast_path_semantics(void) {
             CHECK(p8p_runtime_step(runtime, 0) == 0);
             p8p_runtime_api_profile_t profile = {};
             p8p_runtime_get_api_profile(runtime, &profile);
-            CHECK(profile.calls[P8P_API_DRAW_STATE] == (profiled ? 2u : 0u));
+            CHECK(profile.calls[P8P_API_DRAW_STATE] == (profiled ? 4u : 0u));
         }
     }
     p8p_runtime_destroy(runtime);

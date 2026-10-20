@@ -35,3 +35,12 @@ int p8p_draw_palette_identity(const uint8_t *palette) {
     }
     return 1;
 }
+
+/* Keep this SDRAM entry outside LTO, preserving the existing BRAM leaves. */
+extern "C" __attribute__((noinline)) int p8p_api_palt(lua_State *lua) {
+    p8p_runtime_t *runtime = p8p_active_runtime;
+    if (lua->top == lua->ci->func + 1 && runtime && !runtime->profile_hook &&
+        runtime->transparency_default)
+        return 0;
+    return p8p_api_palt_full(lua);
+}
