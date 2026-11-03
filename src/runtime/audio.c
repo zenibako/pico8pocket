@@ -930,6 +930,8 @@ static inline int32_t divide_by_56(int32_t x) {
 static int32_t synthesize(p8p_audio_t *audio) {
     int32_t mix = 0;
     advance_sequencer(audio);
+    /* Reverb and distortion apply to every channel; read them once. */
+    int hw_effects = audio->ram[0x5f41] | audio->ram[0x5f43];
     for (int index = 0; index < 4; ++index) {
         p8p_audio_channel_t *channel = &audio->channels[index];
         p8p_audio_extra_t *extra = &audio->extra[index];
@@ -963,7 +965,7 @@ static int32_t synthesize(p8p_audio_t *audio) {
                 extra->last_value = 0;
                 extra->joint_left = 0;
             }
-            if (extra->tail_filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+            if (extra->tail_filters >= 24 || hw_effects)
                 value = channel_effects(audio, index, value, extra->tail_filters);
             mix += value;
             continue;
@@ -1001,6 +1003,7 @@ static int32_t synthesize(p8p_audio_t *audio) {
                 filters = 0;  /* instrument finished: silent */
                 sample = 0;
                 volume = 0;
+                extra->last_waveform = channel->waveform;
             }
         } else {
             filters = sfx_data(audio, channel->sfx)[64];
@@ -1013,13 +1016,20 @@ static int32_t synthesize(p8p_audio_t *audio) {
             start_volume_ramp(extra, volume);
         volume = ramped_volume(extra, volume);
         extra->tail_filters = filters;
-        uint8_t waveform = extra->parent_custom && extra->instrument.sfx >= 0 ?
-            (uint8_t)(extra->instrument.waveform | 8) : channel->waveform;
+        /* The waveform only changes when a note (or an instrument note)
+         * starts, or when an instrument ends (set above), so it is only
+         * compared and recorded then. */
+        int waveform_changed = 0;
+        if (note_started) {
+            uint8_t waveform = extra->parent_custom && extra->instrument.sfx >= 0 ?
+                (uint8_t)(extra->instrument.waveform | 8) : channel->waveform;
+            waveform_changed = waveform != extra->last_waveform;
+            extra->last_waveform = waveform;
+        }
         int32_t value = joined_value(
             extra, divide_by_56(sample * ((volume + 4096) >> 13)),
-            note_started && waveform != extra->last_waveform);
-        extra->last_waveform = waveform;
-        if (filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+            waveform_changed);
+        if (filters >= 24 || hw_effects)
             value = channel_effects(audio, index, value, filters);
         mix += value;
         voice_step(audio, channel);
