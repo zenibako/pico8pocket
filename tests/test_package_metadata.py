@@ -54,6 +54,7 @@ class PackageMetadataTests(unittest.TestCase):
         mappings = json.loads((self.tree / 'Cores/zenibako.pico8/input.json').read_text())['input']['controllers'][0]['mappings']
         labels = {item['key']: item['name'] for item in mappings}
         self.assertEqual(labels['pad_btn_select'], 'System Menu')
+        self.assertEqual(labels['pad_btn_start'], 'Cart Menu')
         self.assertEqual(labels['pad_trig_l'], 'L')
         self.assertEqual(labels['pad_trig_r'], 'R')
 

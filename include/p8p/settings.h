@@ -40,6 +40,10 @@ typedef struct p8p_settings {
     uint8_t scale;
     p8p_control_profile_t global_controls;
     p8p_cart_profile_t carts[P8P_CART_PROFILE_COUNT];
+    /* 1: carts' O and X glyphs show the Pocket buttons they are mapped to;
+     * 0: PICO-8's own glyphs.  Added in settings version 2. */
+    uint8_t pocket_glyphs;
+    uint8_t reserved[3];
 } p8p_settings_t;
 
 void p8p_settings_defaults(p8p_settings_t *settings);

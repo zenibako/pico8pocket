@@ -1,5 +1,6 @@
 #include "p8p/cart.h"
 #include "p8p/menu.h"
+#include "p8p/pocket_glyphs.h"
 #include "p8p/multicart.h"
 #include "p8p/pico8_font.h"
 #include "p8p/platform.h"
@@ -148,7 +149,8 @@ static void draw_runtime_error_frame(uint8_t *fb, const char *message) {
         line[line_length] = '\0';
         draw_error_text(fb, 4, y, line, 7);
     }
-    draw_error_text(fb, 40, 117, "SELECT MENU", 6);
+    p8p_menu_draw_text(fb, 64 - p8p_menu_text_width(P8P_ICON_SELECT " MENU") / 2,
+                       117, P8P_ICON_SELECT " MENU", 6);
 }
 
 static uint32_t smooth_time(uint32_t average, uint32_t sample) {
@@ -742,6 +744,13 @@ int main(int argc, char **argv) {
             p8p_settings_controls(&settings, &cart_hash, NULL);
         input_latch.runtime = runtime;
         input_latch.controls = controls;
+        /* Carts' O and X prompts show the Pocket buttons they are mapped to. */
+        p8p_runtime_set_button_glyphs(
+            runtime,
+            settings.pocket_glyphs ?
+                p8p_menu_button_glyph(controls->physical[P8P_ACTION_O]) : NULL,
+            settings.pocket_glyphs ?
+                p8p_menu_button_glyph(controls->physical[P8P_ACTION_X]) : NULL);
         input_latch.suppressed = suppress_buttons;
         uint16_t game_physical = (physical | physical_pressed) &
                                  (uint16_t)~suppress_buttons;

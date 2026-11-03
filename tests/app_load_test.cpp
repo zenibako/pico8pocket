@@ -2,6 +2,7 @@
  * rejection. main.c is compiled separately as C with -Dmain=p8p_app_main. */
 #include "p8p/cart.h"
 #include "p8p/pico8_font.h"
+#include "p8p/pocket_glyphs.h"
 #include "p8p/runtime.h"
 extern "C" {
 #include "p8p/platform.h"
@@ -72,7 +73,13 @@ void p8p_platform_present(const uint8_t *pixels, const uint8_t *palette) {
             text_pixels += pixels[i] == 7;
         assert(text_pixels > 0);
         check_pico8_text(pixels, 6, 6, "RUNTIME ERROR", 8);
-        check_pico8_text(pixels, 40, 117, "SELECT MENU", 6);
+        /* The Select button glyph, then " MENU", centred. */
+        for (int row = 0; row < 5; ++row)
+            for (int column = 0; column < 7; ++column)
+                assert((pixels[(117 + row) * 128 + 50 + column] == 6) ==
+                       (bool)((p8p_pocket_glyphs[P8P_GLYPH_SELECT][row] >>
+                               column) & 1));
+        check_pico8_text(pixels, 58, 117, " MENU", 6);
         memcpy(first_frame, pixels, sizeof first_frame);
         capture(pixels, "load-error");
     } else if (presents == 1) {

@@ -5,13 +5,13 @@
             {
                 "type": "default",
                 "mappings": [
-                    { "id": 0,  "name": "PICO-8 X",     "key": "pad_btn_a" },
-                    { "id": 1,  "name": "PICO-8 O",     "key": "pad_btn_b" },
-                    { "id": 2,  "name": "PICO-8 X Alt", "key": "pad_btn_x" },
-                    { "id": 3,  "name": "PICO-8 O Alt", "key": "pad_btn_y" },
+                    { "id": 0,  "name": "PICO-8 X / Confirm", "key": "pad_btn_a" },
+                    { "id": 1,  "name": "PICO-8 O / Back",    "key": "pad_btn_b" },
+                    { "id": 2,  "name": "PICO-8 X (alt)", "key": "pad_btn_x" },
+                    { "id": 3,  "name": "PICO-8 O (alt)", "key": "pad_btn_y" },
                     { "id": 10, "name": "L",            "key": "pad_trig_l" },
                     { "id": 11, "name": "R",            "key": "pad_trig_r" },
-                    { "id": 20, "name": "Pause",        "key": "pad_btn_start" },
+                    { "id": 20, "name": "Cart Menu",    "key": "pad_btn_start" },
                     { "id": 21, "name": "System Menu",  "key": "pad_btn_select" }
                 ]
             }

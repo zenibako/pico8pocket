@@ -90,6 +90,13 @@ int p8p_runtime_save_state(p8p_runtime_t *runtime, void **data, size_t *size);
 int p8p_runtime_load_state(p8p_runtime_t *runtime, const void *data,
                            size_t size);
 int p8p_runtime_target_fps(const p8p_runtime_t *runtime);
+/* Replaces the default font's O (P8SCII 142) and X (151) button glyphs in
+ * print(), so carts' prompts show the buttons they are mapped to.  Each is
+ * eight rows in the 0x5600 font layout, kept by pointer, or NULL for
+ * PICO-8's own glyph.  Custom fonts are left alone. */
+void p8p_runtime_set_button_glyphs(p8p_runtime_t *runtime,
+                                   const uint8_t *o_rows,
+                                   const uint8_t *x_rows);
 /* Pause-menu entries added by the cart with menuitem(), slots 1-5.  Returns
  * NULL for an empty slot.  The label is printable ASCII, at most 16 chars. */
 const char *p8p_runtime_menu_item(const p8p_runtime_t *runtime, int slot);

@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Start and Select menus now behave alike. Both use the Pocket's convention:
+  A or X chooses and B goes back one level, so B no longer selects in the Start
+  menu. Both say CONTINUE and RESET CART, and resetting from Start now asks
+  first. The cart's `menuitem()` rows and return row live in the Start menu,
+  which Select reaches through a new CART MENU row, so they still work when
+  Start is remapped.
+- Button prompts use Analogue Pocket button glyphs (the same set as
+  Butterscotch Pocket) on every menu page's new hint line, the Controls page,
+  the reset and delete confirmations, the cart picker and the error screen.
+- Carts' 🅾️ and ❎ glyphs in `print()` show the Pocket button each is mapped
+  to. Display → CART ICONS turns this off. Settings move to version 2; version
+  1 settings are kept.
+- The Pocket's controls page names Start "Cart Menu", and A and B "Confirm"
+  and "Back".
+
 - Add the secondary palette. `pal(c, v, 2)` and `pal(table, 2)` set its entries
   at `0x5f60`-`0x5f6f` instead of changing the draw palette, `pal(2)`, `pal()`
   and `pal(-1)` restore PICO-8's default pairs, and `fillp()` keeps its sprite

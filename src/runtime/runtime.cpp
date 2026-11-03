@@ -2424,6 +2424,12 @@ static int api_print(lua_State *lua) {
         /* Glyphs are cut to their own advance, up to the eight stored columns. */
         const uint8_t *rows = one_off ? one_off : (mode & PRINT_CUSTOM_FONT ?
             runtime->ram + 0x5600 : p8p_pico8_font) + character * 8;
+        if (!one_off && !(mode & PRINT_CUSTOM_FONT)) {
+            if (character == 0x8e && runtime->button_glyph_o)
+                rows = runtime->button_glyph_o;
+            else if (character == 0x97 && runtime->button_glyph_x)
+                rows = runtime->button_glyph_x;
+        }
         int render_width = advance / PRINT_SCALED_W(1);
         int render_height = char_height;
         if (render_width > 8) render_width = 8;
@@ -4299,6 +4305,15 @@ extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
         (lua_gettop(thread) > 0 && lua_toboolean(thread, 1));
     luaL_unref(runtime->lua, LUA_REGISTRYINDEX, reference);
     return keep_open;
+}
+
+extern "C" void p8p_runtime_set_button_glyphs(p8p_runtime_t *runtime,
+                                              const uint8_t *o_rows,
+                                              const uint8_t *x_rows) {
+    if (!runtime)
+        return;
+    runtime->button_glyph_o = o_rows;
+    runtime->button_glyph_x = x_rows;
 }
 
 extern "C" int p8p_runtime_target_fps(const p8p_runtime_t *runtime) {
