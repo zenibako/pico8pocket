@@ -94,8 +94,8 @@ struct p8p_runtime {
     char error[256];
     /* Glyphs print() draws for P8SCII's O and X buttons in the default
      * font, or NULL for PICO-8's own; see p8p_runtime_set_button_glyphs. */
-    const uint8_t *button_glyph_o;
-    const uint8_t *button_glyph_x;
+    const uint16_t *button_glyph_o;
+    const uint16_t *button_glyph_x;
 };
 
 extern "C" {

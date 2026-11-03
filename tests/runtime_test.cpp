@@ -352,17 +352,21 @@ static void menus_share_buttons_and_cart_rows(void) {
     p8p_cart_destroy(&cart);
 }
 
-/* Pocket glyphs are 7x5 wide characters, drawn 8 pixels apart. */
+/* Pocket glyphs are 9x7, start a row above the text and advance 10. */
 static void menu_draws_pocket_glyphs(void) {
     static uint8_t fb[128 * 128];
     memset(fb, 0, sizeof(fb));
-    p8p_menu_draw_text(fb, 0, 0, P8P_ICON_B "A", 7);
-    for (int row = 0; row < 5; ++row)
-        for (int column = 0; column < 7; ++column)
+    p8p_menu_draw_text(fb, 0, 1, P8P_ICON_B "A", 7);
+    for (int row = 0; row < P8P_GLYPH_HEIGHT; ++row)
+        for (int column = 0; column < P8P_GLYPH_WIDTH; ++column)
             CHECK((fb[row * 128 + column] != 0) ==
                   ((p8p_pocket_glyphs[P8P_GLYPH_B][row] >> column) & 1));
-    CHECK(fb[8] == 7);  /* "A" starts at x 8: its top row is ### */
-    CHECK(p8p_menu_text_width(P8P_ICON_A " OK") == 20);
+    CHECK(fb[128 + 10] == 7);  /* "A" starts at x 10: its top row is ### */
+    CHECK(p8p_menu_text_width(P8P_ICON_A " OK") == 22);
+    CHECK(p8p_menu_text_width(P8P_ICON_P8_O) == 8);
+    /* Face buttons: four separate circles, only the pressed one filled. */
+    CHECK(p8p_pocket_glyphs[P8P_GLYPH_A][3] & (1u << 7));
+    CHECK(!(p8p_pocket_glyphs[P8P_GLYPH_A][3] & (1u << 1)));
     CHECK(p8p_menu_button_glyph(P8P_PHYS_B | P8P_PHYS_Y) ==
           p8p_pocket_glyphs[P8P_GLYPH_B]);
     CHECK(p8p_menu_button_glyph(P8P_PHYS_START | P8P_PHYS_X) ==
@@ -375,7 +379,7 @@ static void menu_draws_pocket_glyphs(void) {
 static void print_shows_mapped_button_glyphs(void) {
     static const char source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
-        "function _draw() cls() print(\"\\142\\151\",0,0,7) end\n";
+        "function _draw() cls() print(\"\\142\\151\",8,8,7) end\n";
     p8p_cart_t cart = {};
     p8p_runtime_t *runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
@@ -384,22 +388,29 @@ static void print_shows_mapped_button_glyphs(void) {
     CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
                                     sizeof(source) - 1, &cart) == 0);
     CHECK(p8p_runtime_load(runtime, &cart) == 0);
-    for (int pass = 0; pass < 2; ++pass) {
-        const uint8_t *o = pass ? p8p_pocket_glyphs[P8P_GLYPH_B] :
-                                  p8p_pico8_font + 142 * 8;
-        const uint8_t *x = pass ? p8p_pocket_glyphs[P8P_GLYPH_A] :
-                                  p8p_pico8_font + 151 * 8;
-        if (pass)
-            p8p_runtime_set_button_glyphs(runtime, o, x);
-        CHECK(p8p_runtime_step(runtime, 0) == 0);
-        const uint8_t *fb = p8p_runtime_framebuffer(runtime);
-        for (int row = 0; row < 5; ++row)
-            for (int column = 0; column < 7; ++column) {
-                CHECK((fb[row * 128 + column] != 0) == ((o[row] >> column) & 1));
-                CHECK((fb[row * 128 + 8 + column] != 0) ==
-                      ((x[row] >> column) & 1));
-            }
-    }
+    /* PICO-8's own glyphs: 7x5 at the cell. */
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int row = 0; row < 5; ++row)
+        for (int column = 0; column < 7; ++column) {
+            CHECK((fb[(8 + row) * 128 + 8 + column] != 0) ==
+                  ((p8p_pico8_font[142 * 8 + row] >> column) & 1));
+            CHECK((fb[(8 + row) * 128 + 16 + column] != 0) ==
+                  ((p8p_pico8_font[151 * 8 + row] >> column) & 1));
+        }
+    /* Pocket glyphs: 9x7, one pixel left of and above each cell. */
+    const uint16_t *o = p8p_pocket_glyphs[P8P_GLYPH_B];
+    const uint16_t *x = p8p_pocket_glyphs[P8P_GLYPH_A];
+    p8p_runtime_set_button_glyphs(runtime, o, x);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    fb = p8p_runtime_framebuffer(runtime);
+    for (int row = 0; row < 7; ++row)
+        for (int column = 0; column < 9; ++column) {
+            CHECK((fb[(7 + row) * 128 + 7 + column] != 0) ==
+                  ((o[row] >> column) & 1));
+            CHECK((fb[(7 + row) * 128 + 15 + column] != 0) ==
+                  ((x[row] >> column) & 1));
+        }
     p8p_runtime_destroy(runtime);
     p8p_cart_destroy(&cart);
 }

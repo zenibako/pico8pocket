@@ -2424,12 +2424,18 @@ static int api_print(lua_State *lua) {
         /* Glyphs are cut to their own advance, up to the eight stored columns. */
         const uint8_t *rows = one_off ? one_off : (mode & PRINT_CUSTOM_FONT ?
             runtime->ram + 0x5600 : p8p_pico8_font) + character * 8;
-        if (!one_off && !(mode & PRINT_CUSTOM_FONT)) {
-            if (character == 0x8e && runtime->button_glyph_o)
-                rows = runtime->button_glyph_o;
-            else if (character == 0x97 && runtime->button_glyph_x)
-                rows = runtime->button_glyph_x;
-        }
+        /* A Pocket button glyph in place of O or X: 9x7, so it is drawn
+         * as columns -1..6 and column 7 of the cell, from one row up. */
+        const uint16_t *button = NULL;
+        uint8_t button_left[8] = {0}, button_right[8] = {0};
+        if (!one_off && !(mode & PRINT_CUSTOM_FONT))
+            button = character == 0x8e ? runtime->button_glyph_o :
+                     character == 0x97 ? runtime->button_glyph_x : NULL;
+        if (button)
+            for (int row = 0; row < 7; ++row) {
+                button_left[row] = (uint8_t)(button[row] & 0xff);
+                button_right[row] = (uint8_t)(button[row] >> 8);
+            }
         int render_width = advance / PRINT_SCALED_W(1);
         int render_height = char_height;
         if (render_width > 8) render_width = 8;
@@ -2441,6 +2447,26 @@ static int api_print(lua_State *lua) {
                                 glyph_y + offset_y, pal[color & 15], PRINT_BG(),
                                 draw_mode, 8, 8, advance, cell_height,
                                 glyph_padding);
+            else if (button) {
+                static const uint8_t empty[8] = {0};
+                int wf = (draw_mode & (PRINT_WIDE | PRINT_PINBALL)) ? 2 : 1;
+                int hf = (draw_mode & (PRINT_TALL | PRINT_PINBALL)) ? 2 : 1;
+                int plain = draw_mode & ~(PRINT_SOLID_BG | PRINT_INVERTED);
+                /* The cell's background, then the glyph over it. */
+                if (draw_mode & (PRINT_SOLID_BG | PRINT_INVERTED))
+                    draw_glyph_rows(runtime, empty, glyph_x + offset_x,
+                                    glyph_y + offset_y, pal[color & 15],
+                                    PRINT_BG(), draw_mode & ~PRINT_INVERTED,
+                                    render_width, render_height, advance,
+                                    line_height, padding);
+                draw_glyph_rows(runtime, button_left, glyph_x + offset_x - wf,
+                                glyph_y + offset_y - hf, pal[color & 15], 0,
+                                plain, 8, 7, 0, 0, 0);
+                draw_glyph_rows(runtime, button_right,
+                                glyph_x + offset_x + 7 * wf,
+                                glyph_y + offset_y - hf, pal[color & 15], 0,
+                                plain, 1, 7, 0, 0, 0);
+            }
             else if (character > 0x0f)
                 draw_glyph_rows(runtime, rows, glyph_x + offset_x,
                                 glyph_y + offset_y, pal[color & 15], PRINT_BG(),
@@ -4308,8 +4334,8 @@ extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
 }
 
 extern "C" void p8p_runtime_set_button_glyphs(p8p_runtime_t *runtime,
-                                              const uint8_t *o_rows,
-                                              const uint8_t *x_rows) {
+                                              const uint16_t *o_rows,
+                                              const uint16_t *x_rows) {
     if (!runtime)
         return;
     runtime->button_glyph_o = o_rows;

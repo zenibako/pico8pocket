@@ -46,9 +46,10 @@ uint16_t p8p_menu_glyph(uint32_t character);
 void p8p_menu_draw_text(uint8_t *framebuffer, int x, int y, const char *text,
                         uint8_t color);
 int p8p_menu_text_width(const char *text);
-/* The glyph (font rows) for the first Pocket button in a P8P_PHYS_* mask,
- * or NULL when it holds none; used for carts' O and X prompts. */
-const uint8_t *p8p_menu_button_glyph(uint16_t buttons);
+/* The Pocket glyph (p8p_pocket_glyphs rows) for the first Pocket button in
+ * a P8P_PHYS_* mask, or NULL when it holds none; used for carts' O and X
+ * prompts. */
+const uint16_t *p8p_menu_button_glyph(uint16_t buttons);
 
 #ifdef __cplusplus
 }

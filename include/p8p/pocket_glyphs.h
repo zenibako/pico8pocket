@@ -3,13 +3,14 @@
  * The codepoints match Butterscotch Pocket's prompts
  * (src/openfpga/platform/of_buttons.h in zenibako/Butterscotch), so every
  * Pocket port names a button with the same character.  U+E00D (the Analogue
- * button) is new here.  The shapes are 7x5 wide characters in the style of
- * P8SCII's own button glyphs: the face buttons are a rounded key with a hole
- * where the button sits in the diamond, and the small buttons below the
- * screen (Select, Analogue, Start) and the shoulders fill the one meant.
+ * button) is new here.  As in Butterscotch, the face buttons are four
+ * separate circles in a diamond with the pressed one filled; the small
+ * buttons below the screen (Select, Analogue, Start) and the shoulders fill
+ * the one meant.
  *
- * Rows use the custom-font layout of p8p_pico8_font: bit n of a row is
- * column n, eight bytes per glyph, top row first. */
+ * Each glyph is 9x7: seven rows, bit n of a row is column n.  Row 0 sits one
+ * pixel above the text line, so a glyph spans the gaps above and below a
+ * line of PICO-8's 5-pixel letters. */
 #ifndef P8P_POCKET_GLYPHS_H
 #define P8P_POCKET_GLYPHS_H
 
@@ -50,10 +51,11 @@ enum p8p_pocket_glyph {
 extern "C" {
 #endif
 
-/* Rows in the custom-font layout, eight bytes per glyph; defined in
- * src/app/menu.c.  Kept as bytes so the runtime can hand a row pointer
- * straight to its glyph drawing. */
-extern const uint8_t p8p_pocket_glyphs[P8P_GLYPH_COUNT][8];
+#define P8P_GLYPH_WIDTH 9
+#define P8P_GLYPH_HEIGHT 7
+
+/* Defined in src/app/menu.c. */
+extern const uint16_t p8p_pocket_glyphs[P8P_GLYPH_COUNT][P8P_GLYPH_HEIGHT];
 
 #ifdef __cplusplus
 }
