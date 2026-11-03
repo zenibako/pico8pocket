@@ -823,14 +823,22 @@ static void start_volume_ramp(p8p_audio_extra_t *extra, int32_t target) {
 }
 
 static inline int32_t ramped_volume(p8p_audio_extra_t *extra, int32_t target) {
+    int32_t volume = target;
     if (extra->ramp_left) {
-        target += extra->ramp_offset;
+        volume += extra->ramp_offset;
         extra->ramp_offset -= extra->ramp_step;
-        if (!--extra->ramp_left)
-            extra->ramp_offset = 0;
+        if (--extra->ramp_left) {
+            extra->applied_volume = volume;
+            return volume;
+        }
+        /* The step is truncated, so the last sample can sit a little off
+         * target.  Count the ramp as arrived: otherwise a fade to silence
+         * restarts from that remainder forever and the channel never stops
+         * synthesizing. */
+        extra->ramp_offset = 0;
     }
     extra->applied_volume = target;
-    return target;
+    return volume;
 }
 
 /* A note that changes waveform can begin away from where the last one ended,
