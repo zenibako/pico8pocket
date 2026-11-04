@@ -41,6 +41,7 @@ build)
         -Iinclude -I"$Z" -I"$M" tools/compat_scan.cpp src/runtime/runtime.cpp \
         src/runtime/palette_fast.cpp src/runtime/vm_delegate.cpp \
         src/runtime/audio.c src/runtime/cart.c src/runtime/cart_png.c \
+        src/runtime/bbs.c src/app/multicart.c \
         "${sources[@]}" "$M/miniz.c" -lm -o "$out"
     echo "built $out"
     ;;
