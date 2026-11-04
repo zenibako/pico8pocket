@@ -64,7 +64,7 @@ delete tags or repeatedly rerun the workflow.
   numbered, sort above the last release, and never equal it. The next version
   is the committed core.json version when release prep already bumped it,
   else the last release with the patch bumped; set `NEXT_VERSION=X.Y.Z` for a
-  minor or major release. Run `git fetch --tags` if no tag is found. Pocket
+  minor or major release. Run `git fetch --tags` if no tag is found (`git fetch --unshallow --tags` in a shallow clone). Pocket
   Sync still offers the published release as an update to a test build; that
   prompt is expected.
 - Run `rm -rf .obj/pico8pocket` first if `include/p8p/vm_fasttext.h` changed.

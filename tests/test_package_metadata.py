@@ -44,6 +44,7 @@ class PackageMetadataTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         env = dict(os.environ, SDK_ROOT=str(root / '.deps/openfpgaos-sdk'), BUNDLE_LOCAL_CARTS='0')
+        env.pop('CORE_VERSION', None)
         subprocess.run(['bash', str(script)], env=env, check=True, capture_output=True)
         self.tree = root / 'build/pocket/pico8pocket'
 
@@ -139,6 +140,7 @@ class PackageMetadataTests(unittest.TestCase):
         root = Path(self.temporary.name)
         script = root / 'scripts/assemble-pocket.sh'
         env = dict(os.environ, SDK_ROOT=str(root / '.deps/openfpgaos-sdk'), BUNDLE_LOCAL_CARTS='0')
+        env.pop('CORE_VERSION', None)
         released = json.loads((self.tree / 'Cores/zenibako.pico8/core.json').read_text())
         self.assertEqual(released['core']['metadata']['version'],
                          json.loads((ROOT / 'dist/core/core.json').read_text())['core']['metadata']['version'])
@@ -151,6 +153,9 @@ class PackageMetadataTests(unittest.TestCase):
         bad = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='9.8.7 test'),
                              capture_output=True)
         self.assertNotEqual(bad.returncode, 0)
+        long = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='1.2.3-rc.' + '9' * 23),
+                              capture_output=True)
+        self.assertNotEqual(long.returncode, 0)
 
 
 class TestVersionTests(unittest.TestCase):

@@ -46,6 +46,10 @@ if [[ -n "${CORE_VERSION:-}" ]]; then
         echo "CORE_VERSION must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N" >&2
         exit 1
     }
+    (( ${#CORE_VERSION} <= 31 )) || {
+        echo "CORE_VERSION must be 31 characters or fewer" >&2
+        exit 1
+    }
     jq --arg version "$CORE_VERSION" '.core.metadata.version = $version' \
         "$CORE_DIR/core.json" > "$CORE_DIR/core.json.tmp"
     mv "$CORE_DIR/core.json.tmp" "$CORE_DIR/core.json"
