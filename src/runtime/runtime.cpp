@@ -2487,7 +2487,21 @@ static int api_print(lua_State *lua) {
         if (outline_neighbours) {
             static const int8_t ox[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
             static const int8_t oy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
-            uint8_t interior[256];
+            uint8_t interior[256], interior_right[256];
+            /* A Pocket button glyph swaps its own pixels, at its offset. */
+            auto swap_interior = [&]() {
+                int sx = x + offset_x, sy = draw_y + offset_y;
+                if (!button) {
+                    swap_glyph_interior(runtime, rows, sx, sy, mode, interior);
+                    return;
+                }
+                int wf = (mode & (PRINT_WIDE | PRINT_PINBALL)) ? 2 : 1;
+                int hf = (mode & (PRINT_TALL | PRINT_PINBALL)) ? 2 : 1;
+                swap_glyph_interior(runtime, button_left, sx - wf, sy - hf,
+                                    mode, interior);
+                swap_glyph_interior(runtime, button_right, sx + 7 * wf,
+                                    sy - hf, mode, interior_right);
+            };
             /* The background goes first so it cannot cover the outline. */
             if (mode & PRINT_SOLID_BG) {
                 draw_glyph_rows(runtime, rows, x + offset_x, draw_y + offset_y, 0,
@@ -2497,14 +2511,12 @@ static int api_print(lua_State *lua) {
                 glyph_mode &= ~PRINT_SOLID_BG;
             }
             if (outline_hollow)
-                swap_glyph_interior(runtime, rows, x + offset_x,
-                                    draw_y + offset_y, mode, interior);
+                swap_interior();
             for (int i = 0; i < 8; ++i)
                 if (outline_neighbours & (1 << i))
                     draw(x + ox[i], draw_y + oy[i], outline_color, glyph_mode);
             if (outline_hollow)
-                swap_glyph_interior(runtime, rows, x + offset_x,
-                                    draw_y + offset_y, mode, interior);
+                swap_interior();
         }
         if (underline)
         {

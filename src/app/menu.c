@@ -866,9 +866,11 @@ static enum p8p_menu_action update_pause(p8p_menu_t *menu,
                                          uint16_t pressed) {
     const p8p_control_profile_t *controls = active_controls(menu, NULL);
     /* The cart's pause button closes the menu, as in PICO-8, unless it is
-     * also a confirm or back button here. */
+     * also a confirm, back or direction button here. */
     uint16_t pause = controls->physical[P8P_ACTION_PAUSE] &
-                     (uint16_t)~(P8P_PHYS_A | P8P_PHYS_B | P8P_PHYS_X);
+                     (uint16_t)~(P8P_PHYS_A | P8P_PHYS_B | P8P_PHYS_X |
+                                 P8P_PHYS_UP | P8P_PHYS_DOWN |
+                                 P8P_PHYS_LEFT | P8P_PHYS_RIGHT);
     int item;
     if (pressed & pause)
         return P8P_MENU_CLOSE;
