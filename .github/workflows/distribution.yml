@@ -16,11 +16,7 @@ permissions:
   contents: read
 jobs:
   native:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04, macos-15, windows-2025]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:

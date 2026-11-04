@@ -29,7 +29,7 @@ with a Claude symlink to the same file.
 ## Complete distribution and draft releases
 
 Require **Build and verify distribution** (`distribution.yml`) on the exact candidate commit:
-three native Go platforms, actual Extism/WASI fixture integration, C/C++ host
+native Go tests on Linux, actual Extism/WASI fixture integration, C/C++ host
 regressions, the pinned GCC 13.2 core build/public APF package, and final
 distribution/provenance/checksums. An older green commit does not qualify.
 Inspect annotations for runner-acquisition failures; retry only with
