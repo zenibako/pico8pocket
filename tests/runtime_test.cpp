@@ -364,6 +364,7 @@ static void menu_draws_pocket_glyphs(void) {
     CHECK(fb[128 + 10] == 7);  /* "A" starts at x 10: its top row is ### */
     CHECK(p8p_menu_text_width(P8P_ICON_A " OK") == 22);
     CHECK(p8p_menu_text_width(P8P_ICON_P8_O) == 8);
+    CHECK(p8p_menu_text_width(P8P_ICON_START) == 12);
     /* Face buttons: four separate circles, only the pressed one filled. */
     CHECK(p8p_pocket_glyphs[P8P_GLYPH_A][3] & (1u << 7));
     CHECK(!(p8p_pocket_glyphs[P8P_GLYPH_A][3] & (1u << 1)));

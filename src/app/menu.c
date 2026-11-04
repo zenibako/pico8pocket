@@ -93,10 +93,10 @@ const uint16_t p8p_pocket_glyphs[P8P_GLYPH_COUNT][P8P_GLYPH_HEIGHT] = {
     P8P_GLYPH_ROWS(0x010, 0x038, 0x092, 0x145, 0x092, 0x028, 0x010),
     /* Y        ....#.... ...#.#... .#..#..#. ###...#.# .#..#..#. ...#.#... ....#.... */
     P8P_GLYPH_ROWS(0x010, 0x028, 0x092, 0x147, 0x092, 0x028, 0x010),
-    /* Start    ......... ......... ......##. ......##. .##.#.##. ......... ......... */
-    P8P_GLYPH_ROWS(0x000, 0x000, 0x0c0, 0x0c0, 0x0d6, 0x000, 0x000),
-    /* Select   ......... ......... .##...... .##...... .##.#.##. ......... ......... */
-    P8P_GLYPH_ROWS(0x000, 0x000, 0x006, 0x006, 0x0d6, 0x000, 0x000),
+    /* Start    ........... ........... .#...#...#. #.#.#.#.### .#...#...#. ........... ........... */
+    P8P_GLYPH_ROWS(0x000, 0x000, 0x222, 0x755, 0x222, 0x000, 0x000),
+    /* Select   ........... ........... .#...#...#. ###.#.#.#.# .#...#...#. ........... ........... */
+    P8P_GLYPH_ROWS(0x000, 0x000, 0x222, 0x557, 0x222, 0x000, 0x000),
     /* L        ......... ......... .###.###. .###.#.#. .###.###. ......... ......... */
     P8P_GLYPH_ROWS(0x000, 0x000, 0x0ee, 0x0ae, 0x0ee, 0x000, 0x000),
     /* R        ......... ......... .###.###. .#.#.###. .###.###. ......... ......... */
@@ -111,8 +111,8 @@ const uint16_t p8p_pocket_glyphs[P8P_GLYPH_COUNT][P8P_GLYPH_HEIGHT] = {
     P8P_GLYPH_ROWS(0x000, 0x07c, 0x0ce, 0x0c6, 0x0ce, 0x07c, 0x000),
     /* Right    ......... ..#####.. .##..###. .##...##. .##..###. ..#####.. ......... */
     P8P_GLYPH_ROWS(0x000, 0x07c, 0x0e6, 0x0c6, 0x0e6, 0x07c, 0x000),
-    /* Analogue ......... ......... ....#.... ....#.... .##.#.##. ......... ......... */
-    P8P_GLYPH_ROWS(0x000, 0x000, 0x010, 0x010, 0x0d6, 0x000, 0x000),
+    /* Analogue ........... ........... .#...#...#. #.#.###.#.# .#...#...#. ........... ........... */
+    P8P_GLYPH_ROWS(0x000, 0x000, 0x222, 0x575, 0x222, 0x000, 0x000),
 };
 
 #undef P8P_GLYPH_ROWS
@@ -137,6 +137,17 @@ static const uint16_t *pocket_glyph(uint32_t c) {
     if (c >= P8P_GLYPH_FIRST && c < P8P_GLYPH_FIRST + P8P_GLYPH_COUNT)
         return p8p_pocket_glyphs[c - P8P_GLYPH_FIRST];
     return NULL;
+}
+
+/* Face buttons are 9 wide, the row of small buttons 11. */
+static int pocket_width(const uint16_t *rows) {
+    uint16_t columns = 0;
+    int width = 0;
+    for (int row = 0; row < P8P_GLYPH_HEIGHT; ++row)
+        columns |= rows[row];
+    while (columns >> width)
+        ++width;
+    return width < P8P_GLYPH_WIDTH ? P8P_GLYPH_WIDTH : width;
 }
 
 /* A P8SCII wide character: 7x5 rows in font layout. */
@@ -261,7 +272,8 @@ int p8p_menu_text_width(const char *value) {
     int width = 0;
     while (value && *value) {
         uint32_t c = utf8_next(&value);
-        width += pocket_glyph(c) ? P8P_GLYPH_WIDTH + 1 : p8scii_glyph(c) ? 8 : 4;
+        const uint16_t *pocket = pocket_glyph(c);
+        width += pocket ? pocket_width(pocket) + 1 : p8scii_glyph(c) ? 8 : 4;
     }
     return width;
 }
@@ -274,10 +286,10 @@ void p8p_menu_draw_text(uint8_t *fb, int x, int y, const char *value,
         const uint8_t *wide = p8scii_glyph(c);
         if (pocket) {
             for (int row = 0; row < P8P_GLYPH_HEIGHT; ++row)
-                for (int column = 0; column < P8P_GLYPH_WIDTH; ++column)
+                for (int column = 0; column < P8P_GLYPH_MAX_WIDTH; ++column)
                     if (pocket[row] & (1u << column))
                         plot(fb, x + column, y - 1 + row, color);
-            x += P8P_GLYPH_WIDTH + 1;
+            x += pocket_width(pocket) + 1;
             continue;
         }
         if (wide) {
@@ -507,7 +519,7 @@ static const char *main_label(const p8p_menu_t *menu, int row) {
 }
 
 static void draw_main(p8p_menu_t *menu) {
-    static const char fps_hint[] = P8P_ICON_SELECT "+" P8P_ICON_X " FPS";
+    static const char fps_hint[] = P8P_ICON_SELECT " + " P8P_ICON_X " FPS";
     int rows[ROW_COUNT];
     int count = main_rows(menu, rows);
     if (menu->cursor >= count)

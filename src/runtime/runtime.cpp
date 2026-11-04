@@ -2424,8 +2424,8 @@ static int api_print(lua_State *lua) {
         /* Glyphs are cut to their own advance, up to the eight stored columns. */
         const uint8_t *rows = one_off ? one_off : (mode & PRINT_CUSTOM_FONT ?
             runtime->ram + 0x5600 : p8p_pico8_font) + character * 8;
-        /* A Pocket button glyph in place of O or X: 9x7, so it is drawn
-         * as columns -1..6 and column 7 of the cell, from one row up. */
+        /* A Pocket button glyph in place of O or X: 9x7 (11 for Start), so
+         * it is drawn from column -1 and one row up, in two byte halves. */
         const uint16_t *button = NULL;
         uint8_t button_left[8] = {0}, button_right[8] = {0};
         if (!one_off && !(mode & PRINT_CUSTOM_FONT))
@@ -2465,7 +2465,7 @@ static int api_print(lua_State *lua) {
                 draw_glyph_rows(runtime, button_right,
                                 glyph_x + offset_x + 7 * wf,
                                 glyph_y + offset_y - hf, pal[color & 15], 0,
-                                plain, 1, 7, 0, 0, 0);
+                                plain, 8, 7, 0, 0, 0);
             }
             else if (character > 0x0f)
                 draw_glyph_rows(runtime, rows, glyph_x + offset_x,

@@ -92,7 +92,7 @@ int p8p_runtime_load_state(p8p_runtime_t *runtime, const void *data,
 int p8p_runtime_target_fps(const p8p_runtime_t *runtime);
 /* Replaces the default font's O (P8SCII 142) and X (151) button glyphs in
  * print(), so carts' prompts show the buttons they are mapped to.  Each is a
- * 9x7 Pocket glyph (p8p/pocket_glyphs.h): seven rows, bit n is column n,
+ * Pocket glyph (p8p/pocket_glyphs.h): seven rows, bit n is column n,
  * drawn one pixel left of and above the character cell so it centres on the
  * 7x5 glyph it replaces.  Kept by pointer; NULL keeps PICO-8's own glyph.
  * Custom fonts are left alone. */

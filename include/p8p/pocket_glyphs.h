@@ -4,11 +4,12 @@
  * (src/openfpga/platform/of_buttons.h in zenibako/Butterscotch), so every
  * Pocket port names a button with the same character.  U+E00D (the Analogue
  * button) is new here.  As in Butterscotch, the face buttons are four
- * separate circles in a diamond with the pressed one filled; the small
- * buttons below the screen (Select, Analogue, Start) and the shoulders fill
- * the one meant.
+ * separate circles in a diamond with the pressed one filled, and the small
+ * buttons below the screen are a row of three circles (Select, Analogue,
+ * Start) with the pressed one filled.  The shoulders fill the one meant.
  *
- * Each glyph is 9x7: seven rows, bit n of a row is column n.  Row 0 sits one
+ * Each glyph is 9x7 (the small-button row 11x7): seven rows, bit n of a
+ * row is column n.  Row 0 sits one
  * pixel above the text line, so a glyph spans the gaps above and below a
  * line of PICO-8's 5-pixel letters. */
 #ifndef P8P_POCKET_GLYPHS_H
@@ -52,6 +53,8 @@ extern "C" {
 #endif
 
 #define P8P_GLYPH_WIDTH 9
+/* Select, Analogue and Start are a row of three circles, 11 wide. */
+#define P8P_GLYPH_MAX_WIDTH 11
 #define P8P_GLYPH_HEIGHT 7
 
 /* Defined in src/app/menu.c. */

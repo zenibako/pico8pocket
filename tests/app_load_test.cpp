@@ -75,11 +75,11 @@ void p8p_platform_present(const uint8_t *pixels, const uint8_t *palette) {
         check_pico8_text(pixels, 6, 6, "RUNTIME ERROR", 8);
         /* The Select button glyph, then " MENU", centred. */
         for (int row = 0; row < P8P_GLYPH_HEIGHT; ++row)
-            for (int column = 0; column < P8P_GLYPH_WIDTH; ++column)
-                assert((pixels[(116 + row) * 128 + 49 + column] == 6) ==
+            for (int column = 0; column < P8P_GLYPH_MAX_WIDTH; ++column)
+                assert((pixels[(116 + row) * 128 + 48 + column] == 6) ==
                        (bool)((p8p_pocket_glyphs[P8P_GLYPH_SELECT][row] >>
                                column) & 1));
-        check_pico8_text(pixels, 59, 117, " MENU", 6);
+        check_pico8_text(pixels, 60, 117, " MENU", 6);
         memcpy(first_frame, pixels, sizeof first_frame);
         capture(pixels, "load-error");
     } else if (presents == 1) {
