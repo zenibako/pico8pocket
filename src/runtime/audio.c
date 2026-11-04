@@ -974,7 +974,9 @@ static int32_t synthesize(p8p_audio_t *audio) {
             volume = ramped_volume(extra, 0);
             int32_t value = joined_value(
                 extra, divide_by_56(sample * ((volume + 4096) >> 13)), 0);
-            int effects = extra->tail_filters >= 24 || hw_effects;
+            /* Only this channel's own hardware bits keep its tail alive. */
+            int effects = extra->tail_filters >= 24 ||
+                          (hw_effects & (0x11 << index));
             if (!extra->ramp_left) {
                 /* Faded out: the next sound starts from silence. */
                 extra->last_value = 0;
@@ -1045,8 +1047,13 @@ static int32_t synthesize(p8p_audio_t *audio) {
         int32_t value = joined_value(
             extra, divide_by_56(sample * ((volume + 4096) >> 13)),
             waveform_changed);
-        if (filters >= 24 || hw_effects)
+        if (filters >= 24 || hw_effects) {
             value = channel_effects(audio, index, value, filters);
+            /* Echoes outlive the note even when it stops at zero volume
+             * (no fade-out ramp then), so drain them once it ends. */
+            if (filters >= 24 || (hw_effects & (0x11 << index)))
+                extra->effects_left = P8P_REVERB_LONG;
+        }
         mix += value;
         voice_step(audio, channel);
     }
@@ -1182,6 +1189,10 @@ void p8p_audio_skip(p8p_audio_t *audio, size_t frames) {
         audio->extra[channel].last_value = 0;
         audio->extra[channel].joint_left = 0;
         audio->extra[channel].effects_left = 0;
+        memset(audio->extra[channel].reverb_short, 0,
+               sizeof(audio->extra[channel].reverb_short));
+        memset(audio->extra[channel].reverb_long, 0,
+               sizeof(audio->extra[channel].reverb_long));
     }
     while (samples) {
         uint32_t part = samples > 0x40000000u ? 0x40000000u : (uint32_t)samples;

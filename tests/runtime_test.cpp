@@ -772,7 +772,7 @@ static void audio_volume_ramps(void) {
 
 /* A sound with reverb keeps echoing after it ends, then falls silent. */
 static void audio_reverb_tail_drains(void) {
-    enum { FRAMES = 48000, NOTE_END = 1600, LATE = 44000 };
+    enum { FRAMES = 48000, NOTE_END = 1600, STOP = 1900, LATE = 44000 };
     static uint8_t ram[0x10000];
     static int16_t stereo[FRAMES * 2];
     memset(ram, 0, sizeof(ram));
@@ -781,16 +781,32 @@ static void audio_reverb_tail_drains(void) {
     data[1] = 7 << 1;   /* one square note at full volume */
     data[65] = 4;
     data[67] = 0;
-    render_voices(ram, 1, NULL, 0, stereo, FRAMES);
-    int echo = 0, late = 0;
-    for (size_t frame = NOTE_END + 400; frame < NOTE_END + 2400; ++frame)
-        echo |= stereo[frame * 2];
-    for (size_t frame = LATE; frame < FRAMES; ++frame)
-        late |= stereo[frame * 2];
-    if (!echo || late)
-        fprintf(stderr, "FAIL reverb tail: echo %d late %d\n", echo, late);
-    CHECK(echo != 0);
-    CHECK(late == 0);
+    /* Case 0: the sound ends and fades out with a ramp.  Case 1: a second
+     * note keeps it going, but it is stopped during the silent note between
+     * them, at zero volume with no ramp left; its echoes must still drain. */
+    for (int test = 0; test < 2; ++test) {
+        data[5] = test ? 7 << 1 : 0;
+        p8p_audio_t *audio = p8p_audio_create(ram);
+        CHECK(audio != NULL);
+        if (!audio)
+            return;
+        p8p_audio_sfx(audio, 0, 0, 0, 32);
+        p8p_audio_render(audio, stereo, STOP);
+        if (test)
+            p8p_audio_sfx(audio, -1, 0, 0, 0);
+        p8p_audio_render(audio, stereo + STOP * 2, FRAMES - STOP);
+        p8p_audio_destroy(audio);
+        int echo = 0, late = 0;
+        for (size_t frame = STOP + 100; frame < NOTE_END + 1400; ++frame)
+            echo |= stereo[frame * 2];
+        for (size_t frame = LATE; frame < FRAMES; ++frame)
+            late |= stereo[frame * 2];
+        if (!echo || late)
+            fprintf(stderr, "FAIL reverb tail %d: echo %d late %d\n", test,
+                    echo, late);
+        CHECK(echo != 0);
+        CHECK(late == 0);
+    }
 }
 
 static void audio_mix_level(void) {
