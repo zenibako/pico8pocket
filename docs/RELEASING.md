@@ -60,7 +60,11 @@ Review and sign a conventional commit on a topic branch. **Build and verify
 distribution** (`distribution.yml`) runs on pushes, PRs and explicit
 dispatches. It requires:
 
-- Go 1.25.0 native tests and vet on Linux, macOS and Windows.
+- Go 1.25.0 native tests and vet on Linux. The Go code is the Pocket Sync
+  plugin and its offline tools, so per-OS desktop runners are not required.
+  Pushes and PRs run them only when Go files, `go.mod`/`go.sum` or the
+  embedded `compatibility/offline-carts.json` change; release dispatches
+  always run them.
 - A TinyGo 0.43.0 WASI plugin build with Binaryen 133 and real Extism/WASI
   tests using generated
   project-owned fixtures; no private cartridges or live BBS requests are needed.
