@@ -2431,10 +2431,16 @@ static int api_print(lua_State *lua) {
         if (!one_off && !(mode & PRINT_CUSTOM_FONT))
             button = character == 0x8e ? runtime->button_glyph_o :
                      character == 0x97 ? runtime->button_glyph_x : NULL;
+        int button_right_width = 0;
         if (button)
             for (int row = 0; row < 7; ++row) {
                 button_left[row] = (uint8_t)(button[row] & 0xff);
                 button_right[row] = (uint8_t)(button[row] >> 8);
+                for (int bit = 7; bit >= button_right_width; --bit)
+                    if (button_right[row] >> bit & 1) {
+                        button_right_width = bit + 1;
+                        break;
+                    }
             }
         int render_width = advance / PRINT_SCALED_W(1);
         int render_height = char_height;
@@ -2451,21 +2457,25 @@ static int api_print(lua_State *lua) {
                 static const uint8_t empty[8] = {0};
                 int wf = (draw_mode & (PRINT_WIDE | PRINT_PINBALL)) ? 2 : 1;
                 int hf = (draw_mode & (PRINT_TALL | PRINT_PINBALL)) ? 2 : 1;
-                int plain = draw_mode & ~(PRINT_SOLID_BG | PRINT_INVERTED);
-                /* The cell's background, then the glyph over it. */
-                if (draw_mode & (PRINT_SOLID_BG | PRINT_INVERTED))
+                /* The cell's solid background, then the glyph over it.  When
+                 * inverted, each half fills its own box (the glyph's width
+                 * and 7 rows) and leaves the glyph's pixels as holes. */
+                if (draw_mode & PRINT_SOLID_BG)
                     draw_glyph_rows(runtime, empty, glyph_x + offset_x,
                                     glyph_y + offset_y, pal[color & 15],
                                     PRINT_BG(), draw_mode & ~PRINT_INVERTED,
                                     render_width, render_height, advance,
                                     line_height, padding);
+                int button_mode = draw_mode & ~PRINT_SOLID_BG;
                 draw_glyph_rows(runtime, button_left, glyph_x + offset_x - wf,
                                 glyph_y + offset_y - hf, pal[color & 15], 0,
-                                plain, 8, 7, 0, 0, 0);
-                draw_glyph_rows(runtime, button_right,
-                                glyph_x + offset_x + 7 * wf,
-                                glyph_y + offset_y - hf, pal[color & 15], 0,
-                                plain, 8, 7, 0, 0, 0);
+                                button_mode, 8, 7, 8 * wf, 7 * hf, 0);
+                if (button_right_width)
+                    draw_glyph_rows(runtime, button_right,
+                                    glyph_x + offset_x + 7 * wf,
+                                    glyph_y + offset_y - hf, pal[color & 15],
+                                    0, button_mode, button_right_width, 7,
+                                    button_right_width * wf, 7 * hf, 0);
             }
             else if (character > 0x0f)
                 draw_glyph_rows(runtime, rows, glyph_x + offset_x,

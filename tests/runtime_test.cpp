@@ -380,7 +380,8 @@ static void menu_draws_pocket_glyphs(void) {
 static void print_shows_mapped_button_glyphs(void) {
     static const char source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
-        "function _draw() cls() print(\"\\142\\151\",8,8,7) end\n";
+        "function _draw() cls() print(\"\\142\\151\",8,8,7)"
+        " print(\"\\6i\\142\",40,8,7) end\n";
     p8p_cart_t cart = {};
     p8p_runtime_t *runtime = p8p_runtime_create();
     CHECK(runtime != NULL);
@@ -411,6 +412,9 @@ static void print_shows_mapped_button_glyphs(void) {
                   ((o[row] >> column) & 1));
             CHECK((fb[(7 + row) * 128 + 15 + column] != 0) ==
                   ((x[row] >> column) & 1));
+            /* Inverted: the glyph's box is filled and its pixels are holes. */
+            CHECK((fb[(7 + row) * 128 + 39 + column] != 0) ==
+                  !((o[row] >> column) & 1));
         }
     p8p_runtime_destroy(runtime);
     p8p_cart_destroy(&cart);

@@ -190,6 +190,22 @@ static void runtime_profile_event(void *userdata,
     }
 }
 
+/* Carts' O and X prompts show the Pocket buttons they are mapped to.  Set
+ * before a cart loads too, so prompts printed in _init() use its mapping. */
+static const p8p_control_profile_t *apply_button_glyphs(
+    p8p_runtime_t *runtime, const p8p_settings_t *settings,
+    const p8p_cart_hash_t *cart_hash) {
+    const p8p_control_profile_t *controls =
+        p8p_settings_controls(settings, cart_hash, NULL);
+    p8p_runtime_set_button_glyphs(
+        runtime,
+        settings->pocket_glyphs ?
+            p8p_menu_button_glyph(controls->physical[P8P_ACTION_O]) : NULL,
+        settings->pocket_glyphs ?
+            p8p_menu_button_glyph(controls->physical[P8P_ACTION_X]) : NULL);
+    return controls;
+}
+
 static void set_diagnostics(p8p_runtime_t *runtime, int *visible,
                             runtime_profile_t *profile,
                             uint32_t *average_instructions,
@@ -564,6 +580,8 @@ int main(int argc, char **argv) {
         if (runtime)
             p8p_runtime_set_cartdata_hooks(runtime, runtime_cartdata_load,
                                            runtime_cartdata_save, NULL);
+        if (runtime)
+            apply_button_glyphs(runtime, &settings, &cart_hash);
         if (runtime && p8p_runtime_load(runtime, &loaded_cart) == 0) {
             running = 1;
             /* The OS then refuses another cart's Memory before it is
@@ -679,6 +697,7 @@ int main(int argc, char **argv) {
                     p8p_menu_destroy(menu);
                     menu = p8p_menu_create(&settings, &cart_hash,
                                            p8p_cart_kind_name(cart.kind));
+                    apply_button_glyphs(runtime, &settings, &cart_hash);
                     if (p8p_runtime_load(runtime, &loaded_cart) == 0) {
                         running = 1;
                         runtime_failed = 0;
@@ -741,16 +760,9 @@ int main(int argc, char **argv) {
         }
 
         const p8p_control_profile_t *controls =
-            p8p_settings_controls(&settings, &cart_hash, NULL);
+            apply_button_glyphs(runtime, &settings, &cart_hash);
         input_latch.runtime = runtime;
         input_latch.controls = controls;
-        /* Carts' O and X prompts show the Pocket buttons they are mapped to. */
-        p8p_runtime_set_button_glyphs(
-            runtime,
-            settings.pocket_glyphs ?
-                p8p_menu_button_glyph(controls->physical[P8P_ACTION_O]) : NULL,
-            settings.pocket_glyphs ?
-                p8p_menu_button_glyph(controls->physical[P8P_ACTION_X]) : NULL);
         input_latch.suppressed = suppress_buttons;
         uint16_t game_physical = (physical | physical_pressed) &
                                  (uint16_t)~suppress_buttons;
