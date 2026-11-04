@@ -178,10 +178,19 @@ validate: pocket
 package: validate
 	@./scripts/package-pocket.sh
 
+# Device test builds number themselves with pocket-dev-tools' shared
+# pocket_version.py, so every Pocket port follows one rule. Set
+# POCKET_DEV_TOOLS_ROOT, or keep a pocket-dev-tools checkout next to this one.
+POCKET_DEV_TOOLS_ROOT ?= $(or $(POCKET_HARNESS_ROOT),$(patsubst %/pocket_version.py,%,$(firstword \
+	$(wildcard $(dir $(CURDIR))pocket-dev-tools/pocket_version.py $(dir $(CURDIR))pocket-harness/pocket_version.py))))
+
 # Test build for the device: core.json reports <next>-rc.<N> so it never
-# matches the published release (see scripts/test-version.py).
+# matches the published release.
 package-test:
-	version="$$(python3 scripts/test-version.py)" && $(MAKE) package CORE_VERSION="$$version"
+	@test -f "$(POCKET_DEV_TOOLS_ROOT)/pocket_version.py" || { \
+		echo "package-test needs pocket_version.py from a pocket-dev-tools checkout: set POCKET_DEV_TOOLS_ROOT or clone it next to this repository" >&2; exit 1; }
+	version="$$(python3 "$(POCKET_DEV_TOOLS_ROOT)/pocket_version.py" --repo . --core-json dist/core/core.json)" && \
+		$(MAKE) package CORE_VERSION="$$version"
 
 # Explicit opt-in for private test builds.  Public packages never include
 # locally supplied cartridges.

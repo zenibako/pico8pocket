@@ -160,54 +160,30 @@ class PackageMetadataTests(unittest.TestCase):
         self.assertTrue((self.tree / 'Cores/zenibako.pico8/core.json').is_file())
 
 
-class TestVersionTests(unittest.TestCase):
-    """scripts/test-version.py numbers test builds of the next release."""
+class PackageTestVersionTests(unittest.TestCase):
+    """make package-test takes its version from pocket-dev-tools."""
 
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
-        (self.root / 'scripts').mkdir()
-        shutil.copyfile(ROOT / 'scripts/test-version.py', self.root / 'scripts/test-version.py')
-        self.git('init', '-q')
-        self.set_committed('0.1.0')
-        self.commit('release')
-        self.git('tag', 'v0.1.0')
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tools = Path(self.temp.name)
 
-    def git(self, *args):
-        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t',
-                        *args], check=True, capture_output=True)
+    def package_test(self, tools):
+        return subprocess.run(["make", "-C", str(ROOT), "package-test", f"POCKET_DEV_TOOLS_ROOT={tools}"], capture_output=True, text=True)
 
-    def set_committed(self, version):
-        path = self.root / 'dist/core/core.json'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({'core': {'metadata': {'version': version}}}))
+    def test_explains_a_missing_checkout(self):
+        result = self.package_test(self.tools / "missing")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("POCKET_DEV_TOOLS_ROOT", result.stderr)
 
-    def commit(self, message):
-        self.git('add', '-A')
-        self.git('commit', '-q', '--allow-empty', '-m', message)
-
-    def version(self, **env):
-        return subprocess.run([sys.executable, '-I', str(self.root / 'scripts/test-version.py')],
-                              env=dict(os.environ, **env), check=True, capture_output=True,
-                              text=True).stdout.strip()
-
-    def test_counts_commits_since_the_last_release(self):
-        self.assertEqual(self.version(), '0.1.1-rc.0')
-        self.commit('one')
-        self.commit('two')
-        self.assertEqual(self.version(), '0.1.1-rc.2')
-
-    def test_uses_a_bumped_core_version_or_an_explicit_next_version(self):
-        self.set_committed('0.2.0')
-        self.commit('prepare 0.2.0')
-        self.assertEqual(self.version(), '0.2.0-rc.1')
-        self.assertEqual(self.version(NEXT_VERSION='1.0.0'), '1.0.0-rc.1')
-
-    def test_ignores_prerelease_tags(self):
-        self.commit('one')
-        self.git('tag', 'v0.1.1-rc.1')
-        self.assertEqual(self.version(), '0.1.1-rc.1')
+    def test_stops_when_the_shared_script_fails(self):
+        # A stand-in; pocket-dev-tools tests the real script.
+        (self.tools / "pocket_version.py").write_text(
+            "import sys\nprint('pocket_version: no tag', file=sys.stderr)\nsys.exit(1)\n")
+        result = self.package_test(self.tools)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pocket_version: no tag", result.stderr)
+        self.assertNotIn("make[1]", result.stdout)  # package never ran
 
 
 if __name__ == '__main__':

@@ -59,7 +59,8 @@ delete tags or repeatedly rerun the workflow.
   writes `releases/pico8pocket-v<NEXT>-rc.<N>.zip` and must print "APF package
   validation passed: zenibako.pico8 on pico8".
 - Test builds always use `package-test`, never plain `package`. Its core.json
-  version is `<next>-rc.<N>` from `scripts/test-version.py`: N counts the
+  version is `<next>-rc.<N>` from pocket-dev-tools' shared `pocket_version.py`
+  (set `POCKET_DEV_TOOLS_ROOT`, or keep a sibling checkout): N counts the
   commits since the last `vX.Y.Z` tag, so builds of the next release are
   numbered, sort above the last release, and never equal it. The next version
   is the committed core.json version when release prep already bumped it,

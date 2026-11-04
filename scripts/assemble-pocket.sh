@@ -52,7 +52,7 @@ if [[ ! -f "$SDK_ROOT/src/sdk/include/of_savestate.h" ]]; then
     jq '.core.framework.sleep_supported = false' "$CORE_JSON" > "$CORE_DIR/core.json"
     echo "SDK has no save-state API; core.json advertises no sleep support"
 fi
-# Stamp the test build's own version (scripts/test-version.py) so Pocket
+# Stamp the test build's own version (make package-test) so Pocket
 # tools can tell it apart from the published release.
 if [[ -n "${CORE_VERSION:-}" ]]; then
     jq --arg version "$CORE_VERSION" '.core.metadata.version = $version' \
