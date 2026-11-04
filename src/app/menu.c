@@ -608,6 +608,16 @@ static void button_glyphs(uint16_t mask, char out[48]) {
         snprintf(out, 48, "NONE");
 }
 
+/* Controls: the cart's own profile over the defaults.  Remapping for every
+ * cart is the Pocket's Button Mapping page, which acts before the core. */
+enum {
+    CONTROLS_PROFILE,
+    CONTROLS_FIRST_ACTION,
+    CONTROLS_RESET = CONTROLS_FIRST_ACTION + P8P_CONTROL_ACTIONS,
+    CONTROLS_BACK,
+    CONTROLS_ROWS
+};
+
 static void draw_controls(p8p_menu_t *menu) {
     static const char *actions_en[] = {
         "LEFT", "RIGHT", "UP", "DOWN", P8P_ICON_P8_O, P8P_ICON_P8_X, "PAUSE"
@@ -620,34 +630,36 @@ static void draw_controls(p8p_menu_t *menu) {
     char buttons[48];
     int has_override;
     const p8p_control_profile_t *profile = active_controls(menu, &has_override);
-    menu_base(menu, tr(menu, "CONTROLS", "УПРАВЛЕНИЕ"));
-    snprintf(row, sizeof(row), "%s: %s", tr(menu, "PROFILE", "ПРОФИЛЬ"),
-             has_override ? tr(menu, "CART", "ИГРА") :
-                            tr(menu, "GLOBAL", "ОБЩИЙ"));
-    selected_row(menu, 0, 11, row, 1);
+    menu_base(menu, tr(menu, "CART CONTROLS", "УПРАВЛЕНИЕ ИГРЫ"));
+    snprintf(row, sizeof(row), "%s: %s", tr(menu, "THIS CART", "ЭТА ИГРА"),
+             has_override ? tr(menu, "OWN", "СВОЁ") :
+                            tr(menu, "DEFAULT", "ОБЫЧНОЕ"));
+    selected_row(menu, CONTROLS_PROFILE, 12, row, 1);
     for (int action = 0; action < P8P_CONTROL_ACTIONS; ++action) {
         button_glyphs(profile->physical[action], buttons);
         snprintf(row, sizeof(row), "%s: %s",
                  menu->settings->language ? actions_ru[action] : actions_en[action],
                  buttons);
-        selected_row(menu, action + 1, 19 + action * 7, row, 1);
+        selected_row(menu, CONTROLS_FIRST_ACTION + action, 21 + action * 8,
+                     row, 1);
     }
-    selected_row(menu, 8, 70, tr(menu, "COPY GLOBAL", "КОПИЯ ОБЩЕГО"), 1);
-    selected_row(menu, 9, 77, tr(menu, "RESET DEFAULT", "СБРОС"), 1);
-    selected_row(menu, 10, 84, tr(menu, "MAKE GLOBAL", "СДЕЛАТЬ ОБЩИМ"), 1);
-    selected_row(menu, 11, 91, tr(menu, "USE GLOBAL", "УБРАТЬ ПРОФИЛЬ"),
-                 has_override);
-    selected_row(menu, 12, 98, tr(menu, "BACK", "НАЗАД"), 1);
+    selected_row(menu, CONTROLS_RESET, 79,
+                 tr(menu, "RESET TO DEFAULT", "СБРОС"), has_override);
+    selected_row(menu, CONTROLS_BACK, 87, tr(menu, "BACK", "НАЗАД"), 1);
     if (menu->capture_action >= 0) {
-        fill(menu->framebuffer, 6, 106, 116, 19, 1);
-        text(menu->framebuffer, 10, 109,
+        fill(menu->framebuffer, 6, 99, 116, 19, 1);
+        text(menu->framebuffer, 10, 102,
              tr(menu, "PRESS A BUTTON", "НАЖМИ КНОПКУ"), 10);
-        text(menu->framebuffer, 10, 117,
+        text(menu->framebuffer, 10, 110,
              tr(menu, P8P_ICON_SELECT " CANCEL", P8P_ICON_SELECT " ОТМЕНА"), 6);
-        return;
+    } else if (menu->notice_frames > 0) {
+        text(menu->framebuffer, 4, 98, menu->notice, 10);
+    } else {
+        text(menu->framebuffer, 4, 98,
+             tr(menu, "ALL CARTS: POCKET", "ВСЕ ИГРЫ: POCKET"), 6);
+        text(menu->framebuffer, 4, 106,
+             tr(menu, "BUTTON MAPPING", "BUTTON MAPPING"), 6);
     }
-    if (menu->notice_frames > 0)
-        text(menu->framebuffer, 4, 111, menu->notice, 10);
     footer(menu, tr(menu, P8P_ICON_A " CHANGE  " P8P_ICON_B " BACK",
                           P8P_ICON_A " ИЗМЕНИТЬ  " P8P_ICON_B " НАЗАД"));
 }
@@ -982,7 +994,7 @@ static enum p8p_menu_action update_states(p8p_menu_t *menu,
 static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
     p8p_control_profile_t *cart;
     int has_override;
-    const p8p_control_profile_t *active = active_controls(menu, &has_override);
+    (void)active_controls(menu, &has_override);
     if (menu->capture_action >= 0) {
         uint16_t chosen;
         if (pressed & P8P_PHYS_SELECT) {
@@ -991,6 +1003,7 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
         }
         chosen = first_remappable_button(pressed & ~P8P_PHYS_SELECT);
         if (chosen) {
+            /* The first change gives the cart its own profile. */
             cart = p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 1);
             if (cart) {
                 cart->physical[menu->capture_action] = chosen;
@@ -1007,33 +1020,19 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
     }
     if (!(pressed & P8P_PHYS_A))
         return;
-    if (menu->cursor == 0) {
+    if (menu->cursor == CONTROLS_PROFILE) {
         if (has_override)
             p8p_settings_remove_cart_controls(menu->settings, &menu->cart_hash);
         else
             (void)p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 1);
         save_settings(menu);
-    } else if (menu->cursor >= 1 && menu->cursor <= 7) {
-        menu->capture_action = menu->cursor - 1;
-    } else if (menu->cursor == 8) {
-        cart = p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 1);
-        if (cart) *cart = menu->settings->global_controls;
-        save_settings(menu);
-    } else if (menu->cursor == 9) {
-        if (has_override) {
-            cart = p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 0);
-            p8p_control_profile_defaults(cart);
-        } else {
-            p8p_control_profile_defaults(&menu->settings->global_controls);
-        }
-        save_settings(menu);
-    } else if (menu->cursor == 10) {
-        menu->settings->global_controls = *active;
-        save_settings(menu);
-    } else if (menu->cursor == 11) {
+    } else if (menu->cursor >= CONTROLS_FIRST_ACTION &&
+               menu->cursor < CONTROLS_RESET) {
+        menu->capture_action = menu->cursor - CONTROLS_FIRST_ACTION;
+    } else if (menu->cursor == CONTROLS_RESET && has_override) {
         p8p_settings_remove_cart_controls(menu->settings, &menu->cart_hash);
         save_settings(menu);
-    } else if (menu->cursor == 12) {
+    } else if (menu->cursor == CONTROLS_BACK) {
         enter_screen(menu, SCREEN_MAIN, main_index(menu, ROW_CONTROLS));
     }
 }
@@ -1150,7 +1149,7 @@ enum p8p_menu_action p8p_menu_update(p8p_menu_t *menu,
     switch (menu->screen) {
     case SCREEN_MAIN: count = main_rows(menu, rows); break;
     case SCREEN_STATES: count = P8P_STATE_SLOT_COUNT; break;
-    case SCREEN_CONTROLS: count = 13; break;
+    case SCREEN_CONTROLS: count = CONTROLS_ROWS; break;
     case SCREEN_DISPLAY: count = 3; break;
     case SCREEN_AUDIO: count = 3; break;
     case SCREEN_PAUSE: count = refresh_pause_rows(menu, runtime); break;

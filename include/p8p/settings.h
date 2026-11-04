@@ -38,6 +38,9 @@ typedef struct p8p_settings {
     uint8_t volume;
     uint8_t muted;
     uint8_t scale;
+    /* Always the defaults: the Pocket's own Button Mapping page remaps
+     * buttons for every cart, so the core keeps only per-cart overrides.
+     * Kept for the file layout; a stored custom profile is reset on load. */
     p8p_control_profile_t global_controls;
     p8p_cart_profile_t carts[P8P_CART_PROFILE_COUNT];
     /* 1: carts' O and X glyphs show the Pocket buttons they are mapped to;

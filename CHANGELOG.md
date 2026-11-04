@@ -14,8 +14,10 @@
 - Carts' 🅾️ and ❎ glyphs in `print()` show the Pocket button each is mapped
   to. Display → CART ICONS turns this off. Settings move to version 2; version
   1 settings are kept.
-- The Pocket's controls page names Start "Cart Menu", and A and B "Confirm"
-  and "Back".
+- The Pocket's Button Mapping page names Start "Cart Menu", and A and B
+  "Confirm" and "Back". It is now the place to remap buttons for every cart:
+  the in-core Controls page only sets a cart's own mapping, and a custom
+  global profile from earlier versions is reset to the defaults.
 
 - Add the secondary palette. `pal(c, v, 2)` and `pal(table, 2)` set its entries
   at `0x5f60`-`0x5f6f` instead of changing the draw palette, `pal(2)`, `pal()`

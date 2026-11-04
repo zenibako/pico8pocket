@@ -59,11 +59,11 @@ started and how you can help improve it.
   packed read-modify-write from the common sprite/pixel path and maps the
   display palette during the existing 2× presentation pass.
 - Default controls are `B = O`, `A = X`, `Start = cart menu`; `Y` and `X` are
-  alternate `O` and `X` buttons. The in-core menu has a global profile plus a
-  content-hash-keyed override for each cartridge; D-pad, A/B/X/Y, L/R and Start
-  can all be reassigned while Select remains reserved for the system UI. The
-  Pocket's own controls page lists the defaults only; the in-core Controls
-  page shows the mapping in use.
+  alternate `O` and `X` buttons. Remap buttons for every cart on the Pocket's
+  own Button Mapping page, which lists them by their PICO-8 roles and acts
+  before the core. The in-core Controls page gives one cartridge its own
+  mapping (keyed by content hash) on top of that: D-pad, A/B/X/Y, L/R and
+  Start can all be reassigned, while Select stays reserved for the system UI.
 - Both in-core menus follow the Pocket's convention: A (or X) chooses a row
   and B goes back one level or closes the menu. Every page shows its buttons
   on the bottom line as Pocket button glyphs.

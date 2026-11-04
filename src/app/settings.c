@@ -72,6 +72,7 @@ int p8p_settings_load(p8p_settings_t *settings) {
         return 0;
     }
     settings->pocket_glyphs = settings->pocket_glyphs != 0;
+    p8p_control_profile_defaults(&settings->global_controls);
     settings->language = settings->language != 0;
     settings->muted = settings->muted != 0;
     if (settings->volume > 100) settings->volume = 100;
