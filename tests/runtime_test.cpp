@@ -770,6 +770,29 @@ static void audio_volume_ramps(void) {
     CHECK(largest_step < 600);
 }
 
+/* A sound with reverb keeps echoing after it ends, then falls silent. */
+static void audio_reverb_tail_drains(void) {
+    enum { FRAMES = 48000, NOTE_END = 1600, LATE = 44000 };
+    static uint8_t ram[0x10000];
+    static int16_t stereo[FRAMES * 2];
+    memset(ram, 0, sizeof(ram));
+    set_wave_sfx(ram, 0, 3, 24, 0, 24);
+    uint8_t *data = ram + 0x3200;
+    data[1] = 7 << 1;   /* one square note at full volume */
+    data[65] = 4;
+    data[67] = 0;
+    render_voices(ram, 1, NULL, 0, stereo, FRAMES);
+    int echo = 0, late = 0;
+    for (size_t frame = NOTE_END + 400; frame < NOTE_END + 2400; ++frame)
+        echo |= stereo[frame * 2];
+    for (size_t frame = LATE; frame < FRAMES; ++frame)
+        late |= stereo[frame * 2];
+    if (!echo || late)
+        fprintf(stderr, "FAIL reverb tail: echo %d late %d\n", echo, late);
+    CHECK(echo != 0);
+    CHECK(late == 0);
+}
+
 static void audio_mix_level(void) {
     enum { FRAMES = 4800, PCM_FRAMES = 200, REVERB_SHORT = 398 };
     static uint8_t ram[0x10000];
@@ -1791,6 +1814,7 @@ int main(void) {
     audio_music_empty_pattern();
     audio_volume_ramps();
     audio_mix_level();
+    audio_reverb_tail_drains();
     static const uint8_t source[] =
         "pico-8 cartridge // http://www.pico-8.com\n"
         "version 42\n"

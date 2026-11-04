@@ -88,6 +88,7 @@ typedef struct p8p_audio_extra {
     uint8_t noise_key;               /* key + 1 of noise_gain; 0 = none yet */
     float noise_gain;                /* output gain for the key */
     uint8_t tail_filters;            /* filters of the sound now ending */
+    uint16_t effects_left;           /* silent samples until echoes drain */
     int32_t applied_volume;          /* volume of the last sample played */
     int32_t ramp_offset;             /* applied minus target, closing */
     int32_t ramp_step;
@@ -942,8 +943,21 @@ static int32_t synthesize(p8p_audio_t *audio) {
         int note_started;
         if (channel->sfx < 0) {
             /* Idle: nothing to fade.  One test, as idle is the common case. */
-            if (!(extra->applied_volume | (int32_t)extra->ramp_left))
+            if (!(extra->applied_volume | (int32_t)extra->ramp_left |
+                  extra->effects_left))
                 continue;
+            if (!(extra->applied_volume | (int32_t)extra->ramp_left)) {
+                /* Faded out, but reverb or dampen still sound: run them on
+                 * silence until a whole long delay line has come out 0. */
+                int32_t value = channel_effects(audio, index, 0,
+                                                extra->tail_filters);
+                if (value)
+                    extra->effects_left = P8P_REVERB_LONG;
+                else
+                    --extra->effects_left;
+                mix += value;
+                continue;
+            }
             /* A sound that just ended fades out on its last waveform. */
             if (!extra->ramp_left)
                 start_volume_ramp(extra, 0);
@@ -960,12 +974,14 @@ static int32_t synthesize(p8p_audio_t *audio) {
             volume = ramped_volume(extra, 0);
             int32_t value = joined_value(
                 extra, divide_by_56(sample * ((volume + 4096) >> 13)), 0);
+            int effects = extra->tail_filters >= 24 || hw_effects;
             if (!extra->ramp_left) {
                 /* Faded out: the next sound starts from silence. */
                 extra->last_value = 0;
                 extra->joint_left = 0;
+                extra->effects_left = effects ? P8P_REVERB_LONG : 0;
             }
-            if (extra->tail_filters >= 24 || hw_effects)
+            if (effects)
                 value = channel_effects(audio, index, value, extra->tail_filters);
             mix += value;
             continue;
@@ -1165,6 +1181,7 @@ void p8p_audio_skip(p8p_audio_t *audio, size_t frames) {
         audio->extra[channel].ramp_offset = 0;
         audio->extra[channel].last_value = 0;
         audio->extra[channel].joint_left = 0;
+        audio->extra[channel].effects_left = 0;
     }
     while (samples) {
         uint32_t part = samples > 0x40000000u ? 0x40000000u : (uint32_t)samples;
