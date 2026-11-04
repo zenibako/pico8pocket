@@ -1293,18 +1293,31 @@ static void reset_restores_boot_draw_state(void) {
     p8p_cart_destroy(&cart);
 }
 
-static void rnd_table_matches_flr_rnd(void) {
-    /* PICO-8's rnd(t) is t[flr(rnd(#t))+1] and advances the generator once,
-     * so both sequences must agree after the same srand(). */
+static void rnd_matches_pico8(void) {
+    /* Each sequence was recorded from PICO-8 0.2.7 (macOS, pico8 -x) with
+     * the same expressions.  rnd(t) takes one generator step, rnd({})
+     * takes none. */
     static const char source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(got,want) add(r,got==want) end\n"
         "function _draw()\n"
-        " local t={1,2,3,4,5,6,7} local a,b={},{}\n"
-        " srand(0) for i=1,200 do a[i]=rnd(t) end\n"
-        " srand(0) for i=1,200 do b[i]=flr(rnd(#t))+1 end\n"
-        " local ok=true for i=1,200 do if a[i]~=b[i] then ok=false end end\n"
-        " srand(0) rnd(t) local after=rnd() srand(0) rnd(1) ok=ok and after==rnd()\n"
-        " cls() pset(0,0,ok and 11 or 8)\n"
+        " srand(0) local s='' for i=1,16 do s..=rnd({1,2,3,4})..',' end\n"
+        " is(s,'1,4,2,2,1,2,1,1,2,1,1,2,3,3,4,1,')\n"
+        " srand(0) s='' for i=1,16 do s..=rnd({1,2,3,4,5,6,7})..',' end\n"
+        " is(s,'3,5,7,3,2,6,2,3,7,1,3,2,6,4,4,5,')\n"
+        " srand(0) s='' for i=1,16 do s..=tostr(rnd(4),true)..',' end\n"
+        " is(s,'0x0000.8474,0x0000.5724,0x0001.758c,0x0002.a9c5,"
+        "0x0002.1c9b,0x0001.e12a,0x0003.50d7,0x0003.1070,0x0003.a980,"
+        "0x0002.b42c,0x0002.0427,0x0002.b18a,0x0000.fad8,0x0003.82a2,"
+        "0x0000.bb13,0x0003.203f,')\n"
+        " srand(0) s='' for i=1,8 do s..=rnd({1,2,3,4})..';'..tostr(rnd(4),true)..',' end\n"
+        " is(s,'1;0x0000.5724,2;0x0002.a9c5,1;0x0001.e12a,1;0x0003.1070,"
+        "2;0x0002.b42c,1;0x0002.b18a,3;0x0003.82a2,4;0x0003.203f,')\n"
+        " srand(0) is(tostr(rnd({}))..','..tostr(rnd(),true),'[nil],0x0000.8474')\n"
+        " srand(12345) s='' for i=1,16 do s..=rnd({1,2,3,4})..',' end\n"
+        " is(s,'2,4,2,3,4,4,3,2,2,3,4,4,4,3,2,1,')\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
         "end\n";
     p8p_cart_t cart = {};
     CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
@@ -1313,7 +1326,12 @@ static void rnd_table_matches_flr_rnd(void) {
     CHECK(runtime != NULL);
     CHECK(p8p_runtime_load(runtime, &cart) == 0);
     CHECK(p8p_runtime_step(runtime, 0) == 0);
-    CHECK(p8p_runtime_framebuffer(runtime)[0] == 11);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 6; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL rnd case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
     p8p_runtime_destroy(runtime);
     p8p_cart_destroy(&cart);
 }
@@ -2058,7 +2076,7 @@ int main(void) {
     stat_values_match_pico8();
     reset_restores_boot_draw_state();
     reload_marks_cartdata_dirty();
-    rnd_table_matches_flr_rnd();
+    rnd_matches_pico8();
     full_cart_control_table_keeps_slot_zero();
     line_pen_matches_pico8();
     map_default_size_matches_pico8();

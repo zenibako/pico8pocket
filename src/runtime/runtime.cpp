@@ -2262,19 +2262,19 @@ static int api_srand(lua_State *lua) {
 static int api_rnd(lua_State *lua) {
     profile_api(P8P_API_HELPER);
     p8p_runtime_t *runtime = active_runtime;
-    update_rng(runtime);
     if (lua_istable(lua, 1)) {
-        int length = (int)lua_rawlen(lua, 1);
-        if (length <= 0) {
+        /* Measured in PICO-8 0.2.7: rnd(t) takes one generator step and
+         * picks t[(state >> 8) % #t + 1]; rnd({}) returns nil and takes no
+         * step. */
+        uint32_t length = (uint32_t)lua_rawlen(lua, 1);
+        if (!length) {
             lua_pushnil(lua);
         } else {
-            /* PICO-8 picks t[flr(rnd(#t))+1]: the draw is taken modulo
-             * #t in 16.16, not modulo #t. */
-            uint32_t range = (uint32_t)length << 16;
-            int index = range ? (int)((runtime->rng[1] % range) >> 16) : 0;
-            lua_rawgeti(lua, 1, index + 1);
+            update_rng(runtime);
+            lua_rawgeti(lua, 1, (int)((runtime->rng[1] >> 8) % length) + 1);
         }
     } else {
+        update_rng(runtime);
         fix32 range = arg_number(lua, 1, fix32(1));
         uint32_t bits = (uint32_t)range.bits();
         lua_pushnumber(lua, fix32::frombits(bits ? runtime->rng[1] % bits : 0));
