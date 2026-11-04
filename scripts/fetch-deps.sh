@@ -22,16 +22,16 @@ DIABLO_PATHS=(src/sdk tools)
 # The openfpgaOS fork with native Pocket save states and sleep/wake.  Its API
 # headers replace Diablo's; the rest of Diablo's SDK is unchanged by the fork.
 FORK_URL="https://github.com/zenibako/openfpgaCore.git"
-FORK_COMMIT="a58aacd940c1b433c030b97f8207d2c7e03307c8"
+FORK_COMMIT="902a8adc11309c50c8954af2864ddf893c8b1b0c"
 FORK_PATHS=(src/firmware/api)
 # Pocket runtime published from that commit. The loader, OS and bitstream
 # must come from the same build: the bitstream contains the OS's .fasttext
 # and bootloader BRAM image as well as the FPGA logic.
-RUNTIME_URL="https://github.com/zenibako/openfpgaCore/releases/download/pocket-runtime-a58aacd"
+RUNTIME_URL="https://github.com/zenibako/openfpgaCore/releases/download/pocket-runtime-902a8ad"
 RUNTIME_FILES=(os20.rbf_r os.bin loader.bin)
 RUNTIME_SHA256=(
-    "92c0dbbd372e5d0879fdf05b52ecab9891d2bead66fb8e2c24b63ecd23524e87"
-    "d845160d123754a01854dadac6c78dca2e180aefc2711789d3ff32cbab47fc0e"
+    "e2d5300df191ec73a72ae1255008d9f43d36815fb49e4c732403abf36c742327"
+    "cc299efffc0f8fcafaaa265e329439806e061bd4cceb0ab6a96f16f8b2b7fe27"
     "fc1f8d37eb0fb322006b4428f0b59d2801c9b74978bd3f24103f5f9bbfca3c99"
 )
 FAKE08_URL="https://github.com/jtothebell/fake-08.git"
