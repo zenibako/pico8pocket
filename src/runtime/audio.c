@@ -82,7 +82,13 @@ typedef struct p8p_audio_extra {
     uint32_t detune_phase;
     uint32_t phaser_lag;             /* second phaser triangle falls behind */
     float noise_level;               /* noise low-pass state */
+    int32_t noise_increment;         /* pitch the coefficients below are for */
+    float noise_keep;                /* 1 / (1 + scale) */
+    float noise_feed;                /* scale / 8192 / (1 + scale) */
+    uint8_t noise_key;               /* key + 1 of noise_gain; 0 = none yet */
+    float noise_gain;                /* output gain for the key */
     uint8_t tail_filters;            /* filters of the sound now ending */
+    uint16_t effects_left;           /* silent samples until echoes drain */
     int32_t applied_volume;          /* volume of the last sample played */
     int32_t ramp_offset;             /* applied minus target, closing */
     int32_t ramp_step;
@@ -357,7 +363,8 @@ static int32_t triangle(uint32_t phase) {
 }
 
 /* Stateless waveforms 0-5 and 7 (noise needs per-voice state). */
-static inline int32_t basic_waveform(int waveform, uint32_t phase) {
+static inline __attribute__((always_inline)) int32_t basic_waveform(
+    int waveform, uint32_t phase) {
     int32_t sample, position;
     switch (waveform) {
     case 0: /* triangle */
@@ -461,26 +468,69 @@ static uint32_t detune_factor_q16(int waveform, int detune) {
  * pitch, louder at low notes.  Formula from zepto8 via Fake-08 (WTFPL),
  * measured from PICO-8 exports; in float, like the buzz filter.
  */
-static int32_t filtered_noise(p8p_audio_extra_t *extra,
-                              const p8p_audio_channel_t *voice,
-                              int32_t increment, int32_t white) {
-    float scale = (float)(increment > 0 ? increment : 0) *
-                  (8.858923f / 4294967296.f);
+static __attribute__((noinline)) void noise_gain(
+    p8p_audio_extra_t *extra, const p8p_audio_channel_t *voice) {
     float factor = 1.f - (float)voice->key / 63.f;
-    extra->noise_level = (extra->noise_level + scale * (float)white / 8192.f) /
-                         (1.f + scale);
-    return (int32_t)(extra->noise_level * 1.5f * (1.f + factor * factor) *
-                     16384.f);
+    extra->noise_key = (uint8_t)(voice->key + 1);
+    extra->noise_gain = 1.5f * (1.f + factor * factor) * 16384.f;
+}
+
+/* The filter only changes with pitch and the gain with the key, so the
+ * divides run once per note, or one per sample while the pitch moves. */
+static inline int32_t filtered_noise(p8p_audio_extra_t *extra,
+                                     const p8p_audio_channel_t *voice,
+                                     int32_t increment, int32_t white) {
+    if (increment != extra->noise_increment) {
+        float scale = (float)(increment > 0 ? increment : 0) *
+                      (8.858923f / 4294967296.f);
+        extra->noise_increment = increment;
+        extra->noise_keep = 1.f / (1.f + scale);
+        /* scale / (1 + scale), per unit of white noise */
+        extra->noise_feed = (1.f - extra->noise_keep) * (1.f / 8192.f);
+    }
+    if (extra->noise_key != (uint8_t)(voice->key + 1))
+        noise_gain(extra, voice);
+    extra->noise_level = extra->noise_level * extra->noise_keep +
+                         (float)white * extra->noise_feed;
+    return (int32_t)(extra->noise_level * extra->noise_gain);
+}
+
+/* x / 3 truncated toward zero, exact for |x| < 2^30 (GCC keeps a hardware
+ * divide for constants). */
+static inline int32_t divide_by_3(int32_t x) {
+    int32_t high = (int32_t)(((int64_t)x * 1431655766LL) >> 32);
+    return high - (x >> 31);
+}
+
+/* x / 110 for every uint32 x, without the hardware divide. */
+static inline uint32_t divide_by_110(uint32_t x) {
+    return (uint32_t)(((uint64_t)(x >> 1) * 156180629u) >> 33);
+}
+
+/* The detune filter's second oscillator at half level.  Out of line: most
+ * sounds have no filters, and the hot path stays small. */
+static __attribute__((noinline)) int32_t detune_sample(
+    p8p_audio_extra_t *extra, int waveform, uint8_t filters, int32_t increment) {
+    /* (filters / 8) % 3 for filters 0-255, without a hardware remainder. */
+    int detune = (int)(filters >> 3) - 3 * (int)(((filters >> 3) * 11u) >> 5);
+    if (!detune)
+        return 0;
+    int second_wave = (detune == 2 && waveform == 5) ? 0 : waveform;
+    uint32_t factor = detune_factor_q16(waveform, detune);
+    uint32_t step = (uint32_t)(((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
+                                factor) >> 16);
+    int32_t sample = basic_waveform(second_wave, extra->detune_phase) / 2;
+    extra->detune_phase += step;
+    return sample;
 }
 
 /* One voice's sample including the buzz, noiz and detune filters. */
-static inline int32_t voice_sample(p8p_audio_extra_t *extra,
-                            p8p_audio_channel_t *voice, int32_t increment,
-                            uint8_t filters) {
+static inline __attribute__((always_inline)) int32_t voice_sample(
+    p8p_audio_extra_t *extra, p8p_audio_channel_t *voice, int32_t increment,
+    uint8_t filters) {
     uint32_t phase = voice->phase;
     int buzz = (filters & 4) != 0;
     int noiz = (filters & 2) != 0;
-    int detune = (filters / 8) % 3;
     int32_t sample;
     if (buzz && voice->waveform != 6) {
         uint32_t next_phase = phase + (uint32_t)(increment > 0 ? increment : 0);
@@ -492,8 +542,9 @@ static inline int32_t voice_sample(p8p_audio_extra_t *extra,
         /* Twice one triangle, plus one running 109/110 as fast. */
         uint32_t step = (uint32_t)(increment > 0 ? increment : 0);
         voice->phase = phase + step;
-        sample = (2 * triangle(phase) + triangle(phase - extra->phaser_lag)) / 3;
-        extra->phaser_lag += step / 110u;
+        sample = divide_by_3(2 * triangle(phase) +
+                             triangle(phase - extra->phaser_lag));
+        extra->phaser_lag += divide_by_110(step);
     } else {
         sample = waveform_sample(voice, increment);
         if (voice->waveform == 6)
@@ -505,15 +556,17 @@ static inline int32_t voice_sample(p8p_audio_extra_t *extra,
             sample = (int32_t)(((int64_t)sample * saw) >> 15);
         }
     }
-    if (detune && voice->waveform != 6) {
-        int second_wave = (detune == 2 && voice->waveform == 5) ? 0 : voice->waveform;
-        uint32_t factor = detune_factor_q16(voice->waveform, detune);
-        uint32_t step = (uint32_t)(((uint64_t)(uint32_t)(increment > 0 ? increment : 0) *
-                                    factor) >> 16);
-        sample += basic_waveform(second_wave, extra->detune_phase) / 2;
-        extra->detune_phase += step;
-    }
+    if (filters >= 8 && voice->waveform != 6)
+        sample += detune_sample(extra, voice->waveform, filters, increment);
     return sample;
+}
+
+/* The fade-out of a sound that has ended runs for only 70 samples, so it
+ * calls an out-of-line copy and keeps the hot paths inlined. */
+static __attribute__((noinline)) int32_t tail_voice_sample(
+    p8p_audio_extra_t *extra, p8p_audio_channel_t *voice, int32_t increment,
+    uint8_t filters) {
+    return voice_sample(extra, voice, increment, filters);
 }
 
 /* Instantaneous pitch step of a voice, applying vibrato and arpeggios. */
@@ -657,6 +710,7 @@ static void reset_extra(p8p_audio_t *audio) {
         audio->extra[channel].seen_note = -1;
         audio->extra[channel].last_instrument = 0xff;
         audio->extra[channel].last_key = 0xff;
+        audio->extra[channel].noise_increment = INT32_MIN;  /* no filter yet */
     }
 }
 
@@ -823,14 +877,29 @@ static void start_volume_ramp(p8p_audio_extra_t *extra, int32_t target) {
 }
 
 static inline int32_t ramped_volume(p8p_audio_extra_t *extra, int32_t target) {
+    int32_t volume = target;
     if (extra->ramp_left) {
-        target += extra->ramp_offset;
+        volume += extra->ramp_offset;
         extra->ramp_offset -= extra->ramp_step;
-        if (!--extra->ramp_left)
-            extra->ramp_offset = 0;
+        if (--extra->ramp_left) {
+            extra->applied_volume = volume;
+            return volume;
+        }
+        /* The step is truncated, so the last sample can sit a little off
+         * target.  Count the ramp as arrived: otherwise a fade to silence
+         * restarts from that remainder forever and the channel never stops
+         * synthesizing. */
+        extra->ramp_offset = 0;
     }
     extra->applied_volume = target;
-    return target;
+    return volume;
+}
+
+/* x / 70 truncated toward zero, exact for |x| < 2^25 (a crossfade term is
+ * at most 69 times twice a channel's output). */
+static inline int32_t divide_by_70(int32_t x) {
+    int32_t high = (int32_t)(((int64_t)x * 61356676LL) >> 32);
+    return high - (x >> 31);
 }
 
 /* A note that changes waveform can begin away from where the last one ended,
@@ -845,7 +914,7 @@ static inline int32_t joined_value(p8p_audio_extra_t *extra, int32_t value,
     }
     if (extra->joint_left) {
         int32_t left = (int32_t)--extra->joint_left;
-        value += (extra->joint_from - value) * left / P8P_VOLUME_RAMP_SAMPLES;
+        value += divide_by_70((extra->joint_from - value) * left);
     }
     extra->last_value = value;
     return value;
@@ -862,6 +931,8 @@ static inline int32_t divide_by_56(int32_t x) {
 static int32_t synthesize(p8p_audio_t *audio) {
     int32_t mix = 0;
     advance_sequencer(audio);
+    /* Reverb and distortion apply to every channel; read them once. */
+    int hw_effects = audio->ram[0x5f41] | audio->ram[0x5f43];
     for (int index = 0; index < 4; ++index) {
         p8p_audio_channel_t *channel = &audio->channels[index];
         p8p_audio_extra_t *extra = &audio->extra[index];
@@ -871,28 +942,48 @@ static int32_t synthesize(p8p_audio_t *audio) {
         uint8_t filters;
         int note_started;
         if (channel->sfx < 0) {
-            /* A sound that just ended fades out on its last waveform. */
-            if (extra->applied_volume && !extra->ramp_left)
-                start_volume_ramp(extra, 0);
-            if (!extra->ramp_left) {
-                extra->applied_volume = 0;
-                extra->last_value = 0;
-                extra->joint_left = 0;
+            /* Idle: nothing to fade.  One test, as idle is the common case. */
+            if (!(extra->applied_volume | (int32_t)extra->ramp_left |
+                  extra->effects_left))
+                continue;
+            if (!(extra->applied_volume | (int32_t)extra->ramp_left)) {
+                /* Faded out, but reverb or dampen still sound: run them on
+                 * silence until a whole long delay line has come out 0. */
+                int32_t value = channel_effects(audio, index, 0,
+                                                extra->tail_filters);
+                if (value)
+                    extra->effects_left = P8P_REVERB_LONG;
+                else
+                    --extra->effects_left;
+                mix += value;
                 continue;
             }
+            /* A sound that just ended fades out on its last waveform. */
+            if (!extra->ramp_left)
+                start_volume_ramp(extra, 0);
             if (extra->parent_custom && extra->instrument.sfx >= 0) {
                 p8p_audio_channel_t *voice = &extra->instrument;
                 int32_t scaled = (int32_t)(((int64_t)voice->increment *
                                             extra->factor_q16) >> 16);
-                sample = voice_sample(extra, voice, scaled, extra->tail_filters);
+                sample = tail_voice_sample(extra, voice, scaled,
+                                           extra->tail_filters);
             } else {
-                sample = voice_sample(extra, channel, channel->increment,
-                                      extra->tail_filters);
+                sample = tail_voice_sample(extra, channel, channel->increment,
+                                           extra->tail_filters);
             }
             volume = ramped_volume(extra, 0);
             int32_t value = joined_value(
                 extra, divide_by_56(sample * ((volume + 4096) >> 13)), 0);
-            if (extra->tail_filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+            /* Only this channel's own hardware bits keep its tail alive. */
+            int effects = extra->tail_filters >= 24 ||
+                          (hw_effects & (0x11 << index));
+            if (!extra->ramp_left) {
+                /* Faded out: the next sound starts from silence. */
+                extra->last_value = 0;
+                extra->joint_left = 0;
+                extra->effects_left = effects ? P8P_REVERB_LONG : 0;
+            }
+            if (effects)
                 value = channel_effects(audio, index, value, extra->tail_filters);
             mix += value;
             continue;
@@ -930,6 +1021,7 @@ static int32_t synthesize(p8p_audio_t *audio) {
                 filters = 0;  /* instrument finished: silent */
                 sample = 0;
                 volume = 0;
+                extra->last_waveform = channel->waveform;
             }
         } else {
             filters = sfx_data(audio, channel->sfx)[64];
@@ -942,14 +1034,26 @@ static int32_t synthesize(p8p_audio_t *audio) {
             start_volume_ramp(extra, volume);
         volume = ramped_volume(extra, volume);
         extra->tail_filters = filters;
-        uint8_t waveform = extra->parent_custom && extra->instrument.sfx >= 0 ?
-            (uint8_t)(extra->instrument.waveform | 8) : channel->waveform;
+        /* The waveform only changes when a note (or an instrument note)
+         * starts, or when an instrument ends (set above), so it is only
+         * compared and recorded then. */
+        int waveform_changed = 0;
+        if (note_started) {
+            uint8_t waveform = extra->parent_custom && extra->instrument.sfx >= 0 ?
+                (uint8_t)(extra->instrument.waveform | 8) : channel->waveform;
+            waveform_changed = waveform != extra->last_waveform;
+            extra->last_waveform = waveform;
+        }
         int32_t value = joined_value(
             extra, divide_by_56(sample * ((volume + 4096) >> 13)),
-            note_started && waveform != extra->last_waveform);
-        extra->last_waveform = waveform;
-        if (filters >= 24 || audio->ram[0x5f41] || audio->ram[0x5f43])
+            waveform_changed);
+        if (filters >= 24 || hw_effects) {
             value = channel_effects(audio, index, value, filters);
+            /* Echoes outlive the note even when it stops at zero volume
+             * (no fade-out ramp then), so drain them once it ends. */
+            if (filters >= 24 || (hw_effects & (0x11 << index)))
+                extra->effects_left = P8P_REVERB_LONG;
+        }
         mix += value;
         voice_step(audio, channel);
     }
@@ -1084,6 +1188,11 @@ void p8p_audio_skip(p8p_audio_t *audio, size_t frames) {
         audio->extra[channel].ramp_offset = 0;
         audio->extra[channel].last_value = 0;
         audio->extra[channel].joint_left = 0;
+        audio->extra[channel].effects_left = 0;
+        memset(audio->extra[channel].reverb_short, 0,
+               sizeof(audio->extra[channel].reverb_short));
+        memset(audio->extra[channel].reverb_long, 0,
+               sizeof(audio->extra[channel].reverb_long));
     }
     while (samples) {
         uint32_t part = samples > 0x40000000u ? 0x40000000u : (uint32_t)samples;
