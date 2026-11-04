@@ -85,7 +85,11 @@ patches allow fetching/reconstructing the corresponding external sources.
 
 For local core checks, run `make deps`, then `make test`, and
 `make package USE_SDK_CONTAINER=0`. Do not run a parallel dependency fetch
-alongside compilation. Local builds with another compiler are test builds;
+alongside compilation. Builds for device testing use `make package-test`,
+which stamps core.json with `<next>-rc.<N>` (N = commits since the last
+release tag) from pocket-dev-tools' shared `pocket_version.py`, found through
+`POCKET_DEV_TOOLS_ROOT` or a sibling `pocket-dev-tools` checkout, so a test build never reports the
+published version. Local builds with another compiler are test builds;
 release CI records and enforces GCC 13.2.0. Never use `make package-local` for
 public artifacts. Neither workflow downloads cartridges or includes saves.
 

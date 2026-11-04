@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -43,6 +44,7 @@ class PackageMetadataTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         env = dict(os.environ, SDK_ROOT=str(root / '.deps/openfpgaos-sdk'), BUNDLE_LOCAL_CARTS='0')
+        env.pop('CORE_VERSION', None)
         subprocess.run(['bash', str(script)], env=env, check=True, capture_output=True)
         self.tree = root / 'build/pocket/pico8pocket'
 
@@ -132,6 +134,56 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertEqual(names[10+index], f'pico8pocket_{index}.sav')
         subprocess.run(['bash', str(ROOT / 'scripts/validate-pocket.sh'), str(self.tree)],
                        env=dict(os.environ, BUNDLE_LOCAL_CARTS='0'), check=True, capture_output=True)
+
+    def test_test_build_version_replaces_only_the_packaged_version(self):
+        """A test build reports its -rc.N version; the committed core.json keeps the release."""
+        root = Path(self.temporary.name)
+        script = root / 'scripts/assemble-pocket.sh'
+        env = dict(os.environ, SDK_ROOT=str(root / '.deps/openfpgaos-sdk'), BUNDLE_LOCAL_CARTS='0')
+        env.pop('CORE_VERSION', None)
+        released = json.loads((self.tree / 'Cores/zenibako.pico8/core.json').read_text())
+        self.assertEqual(released['core']['metadata']['version'],
+                         json.loads((ROOT / 'dist/core/core.json').read_text())['core']['metadata']['version'])
+        subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='9.8.7-rc.6'),
+                       check=True, capture_output=True)
+        tested = json.loads((self.tree / 'Cores/zenibako.pico8/core.json').read_text())
+        self.assertEqual(tested['core']['metadata']['version'], '9.8.7-rc.6')
+        released['core']['metadata']['version'] = '9.8.7-rc.6'
+        self.assertEqual(tested, released)
+        bad = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='9.8.7 test'),
+                             capture_output=True)
+        self.assertNotEqual(bad.returncode, 0)
+        long = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='1.2.3-rc.' + '9' * 23),
+                              capture_output=True)
+        self.assertNotEqual(long.returncode, 0)
+        # Rejected before the previous tree is removed.
+        self.assertTrue((self.tree / 'Cores/zenibako.pico8/core.json').is_file())
+
+
+class PackageTestVersionTests(unittest.TestCase):
+    """make package-test takes its version from pocket-dev-tools."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.tools = Path(self.temp.name)
+
+    def package_test(self, tools):
+        return subprocess.run(["make", "-C", str(ROOT), "package-test", f"POCKET_DEV_TOOLS_ROOT={tools}"], capture_output=True, text=True)
+
+    def test_explains_a_missing_checkout(self):
+        result = self.package_test(self.tools / "missing")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("POCKET_DEV_TOOLS_ROOT", result.stderr)
+
+    def test_stops_when_the_shared_script_fails(self):
+        # A stand-in; pocket-dev-tools tests the real script.
+        (self.tools / "pocket_version.py").write_text(
+            "import sys\nprint('pocket_version: no tag', file=sys.stderr)\nsys.exit(1)\n")
+        result = self.package_test(self.tools)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("pocket_version: no tag", result.stderr)
+        self.assertNotIn("make[1]", result.stdout)  # package never ran
 
 
 if __name__ == '__main__':
