@@ -129,8 +129,9 @@ p8p_control_profile_t *p8p_settings_cart_controls(
     }
     if (!create)
         return NULL;
+    /* A full table must not take another cart's saved mapping. */
     if (free_index < 0)
-        free_index = 0;
+        return NULL;
     settings->carts[free_index].used = 1;
     settings->carts[free_index].hash = *hash;
     settings->carts[free_index].controls = settings->global_controls;

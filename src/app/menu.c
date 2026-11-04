@@ -1010,9 +1010,12 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
             if (cart) {
                 cart->physical[menu->capture_action] = chosen;
                 save_settings(menu);
+                set_notice(menu, tr(menu, "MAPPED", "НАЗНАЧЕНО"));
+            } else {
+                set_notice(menu, tr(menu, "NO FREE CART SLOT",
+                                    "НЕТ МЕСТА"));
             }
             menu->capture_action = -1;
-            set_notice(menu, tr(menu, "MAPPED", "НАЗНАЧЕНО"));
         }
         return;
     }
@@ -1025,8 +1028,8 @@ static void update_controls(p8p_menu_t *menu, uint16_t pressed) {
     if (menu->cursor == CONTROLS_PROFILE) {
         if (has_override)
             p8p_settings_remove_cart_controls(menu->settings, &menu->cart_hash);
-        else
-            (void)p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 1);
+        else if (!p8p_settings_cart_controls(menu->settings, &menu->cart_hash, 1))
+            set_notice(menu, tr(menu, "NO FREE CART SLOT", "НЕТ МЕСТА"));
         save_settings(menu);
     } else if (menu->cursor >= CONTROLS_FIRST_ACTION &&
                menu->cursor < CONTROLS_RESET) {

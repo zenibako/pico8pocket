@@ -2181,10 +2181,7 @@ static int api_reload(lua_State *lua) {
                                                          : RAM_SIZE - destination;
             memcpy(active_runtime->ram + destination,
                    active_runtime->cart_rom + source, (size_t)chunk);
-            if (range_touches_screen(destination, chunk))
-                ram_to_screen_range(active_runtime, destination, chunk);
-            if (range_touches_draw_state(destination, chunk))
-                draw_state_from_ram(active_runtime);
+            ram_written(active_runtime, destination, chunk);
             source += chunk;
             length -= chunk;
             destination = 0;
@@ -2265,15 +2262,19 @@ static int api_srand(lua_State *lua) {
 static int api_rnd(lua_State *lua) {
     profile_api(P8P_API_HELPER);
     p8p_runtime_t *runtime = active_runtime;
-    update_rng(runtime);
     if (lua_istable(lua, 1)) {
-        int length = (int)lua_rawlen(lua, 1);
-        if (length <= 0) {
+        /* Measured in PICO-8 0.2.7: rnd(t) takes one generator step and
+         * picks t[(state >> 8) % #t + 1]; rnd({}) returns nil and takes no
+         * step. */
+        uint32_t length = (uint32_t)lua_rawlen(lua, 1);
+        if (!length) {
             lua_pushnil(lua);
         } else {
-            lua_rawgeti(lua, 1, (int)(runtime->rng[1] % (uint32_t)length) + 1);
+            update_rng(runtime);
+            lua_rawgeti(lua, 1, (int)((runtime->rng[1] >> 8) % length) + 1);
         }
     } else {
+        update_rng(runtime);
         fix32 range = arg_number(lua, 1, fix32(1));
         uint32_t bits = (uint32_t)range.bits();
         lua_pushnumber(lua, fix32::frombits(bits ? runtime->rng[1] % bits : 0));
