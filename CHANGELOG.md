@@ -19,6 +19,72 @@
   the in-core Controls page only sets a cart's own mapping, and a custom
   global profile from earlier versions is reset to the defaults.
 
+- `_set_fps(60)` in top-level code makes `flip()` loops there run at 60 fps,
+  as in PICO-8 0.2.7, and `time()` stays continuous when the rate changes.
+  Carts that run their title screen or whole game from top-level code used to
+  run at half speed after calling it.
+
+- `pal(c, v, 1)` keeps the low byte of `v` at `0x5f10 + c` and returns the
+  byte it replaced, as PICO-8 0.2.7 does, instead of storing `v & 0x8f`. The
+  display still uses the colour bits, so only peeks and return values change.
+
+- The `btnp()` repeat delay and interval at `0x5f5c` and `0x5f5d` start at 0,
+  which means PICO-8's defaults of 15 and 4 frames, instead of holding 15 and
+  4. Repeat timing is unchanged; carts that peek these bytes now read 0 as in
+  PICO-8 0.2.7.
+
+- Add PICO-8's undocumented built-ins `_set_fps`, `_update_buttons`,
+  `_get_menu_item_selected`, `_map_display`, `_mark_cpu`, `_startframe`,
+  `__trace`, `holdframe`, `_update_framerate` and `set_draw_slice`. Carts that
+  call them, such as ones that run their own main loop, used to stop at load.
+
+- `stat()` returns 0 for codes the core does not model, as PICO-8 0.2.7 does,
+  instead of `nil`; codes 64-71, 100 and 101 still return `nil`. It also
+  reports PICO-8's values for `stat(5)` (43), `stat(11)`-`stat(15)`,
+  `stat(104)`, `stat(109)`-`stat(111)` and `stat(124)`. Carts that compared
+  `stat(108)` with `stat(109)` stopped with an arithmetic error.
+
+- Add `reset()`, which returns the draw state at `0x5f00`-`0x5f7f` (palettes,
+  clip, camera, pen colour, fill pattern, screen mode and memory mapping) to
+  its boot values while keeping the cursor, as in PICO-8 0.2.7. Carts that
+  called it stopped at load with "attempt to call global 'reset'".
+- `line(x, y)` and `line(x, y, c)` continue from the previous line's endpoint,
+  and `line()` starts a new polyline, as in PICO-8 0.2.7. They used to draw a
+  single point, or read the colour as a coordinate. The pen is kept in
+  draw-state RAM at `0x5f35` and `0x5f3c`-`0x5f3f`, so carts can peek and poke
+  it.
+- `map()` with its cell width or height left out draws the whole map, as in
+  PICO-8 0.2.7, instead of only the first 16x16 cells. Carts that move the
+  camera and call `map()` were missing everything past that corner, such as
+  title logos and level scenery. The default follows a map moved or resized
+  through `0x5f56` and `0x5f57`.
+- `peek2(a, n)` and `peek4(a, n)` return `n` values, and `poke2` and `poke4`
+  write every value they are given, as in PICO-8 0.2.7. They used to read and
+  write a single value. `peek`, `peek2` and `peek4` also return no values for
+  a count of 0, a negative count or `nil`, where they used to return one.
+- `peek2`, `poke2`, `peek4`, `poke4`, `memset`, `memcpy` and `reload` reach
+  upper memory (`0x8000`-`0xffff`) and wrap past `0xffff` to `0x0000`, as in
+  PICO-8 0.2.7. Those addresses are negative numbers in PICO-8, and the
+  functions used to ignore them: reads gave 0 and writes did nothing. Carts
+  that keep extra sprite sheets, maps or level data in upper memory lost it.
+  `serial(0x808, ...)` reads PCM samples from upper memory and wraps the same
+  way.
+- Music stops at a pattern whose four channels are all disabled, as in
+  PICO-8, instead of playing through it.
+- Music loops return to the loop-start pattern. They previously resumed one
+  pattern after it, which could reach an empty pattern and play sfx 0 on all
+  four channels.
+- `sfx(nil)` plays sfx 0, as PICO-8 does. It previously acted as `sfx(-1)` and
+  stopped every playing sound effect. `sfx()` with no arguments does nothing.
+- Notes no longer click when they start, change volume, change waveform or
+  end. As in PICO-8 0.2.7, each volume change ramps over about 2.9 ms, a sound
+  that ends fades out on its last waveform, and a new waveform crossfades from
+  the previous output. Low notes made the steps audible on the Pocket speaker.
+- `sfx`/`music` voices match PICO-8's level and shape for each waveform. The
+  triangle and tilted saw were half as loud as PICO-8 and the square, pulse
+  and saw were too loud relative to them. `serial()` PCM plays at full scale,
+  four times louder than before, as in PICO-8. The mix still saturates rather
+  than wraps, so loud four-channel passages can clip.
 - Add the secondary palette. `pal(c, v, 2)` and `pal(table, 2)` set its entries
   at `0x5f60`-`0x5f6f` instead of changing the draw palette, `pal(2)`, `pal()`
   and `pal(-1)` restore PICO-8's default pairs, and `fillp()` keeps its sprite
@@ -79,6 +145,9 @@
 - `circfill` draws the same shape as PICO-8 0.2.7: each row is filled out to
   the outline `circ` draws. Rows near the top and bottom of a circle were
   previously too narrow, so small filled circles looked pinched.
+- Support every `0x5f2c` screen mode: 64x128, 128x64 and 64x64 stretches,
+  mirroring, flips and quarter-turn rotations. Pause menus and save-state
+  previews show the transformed image.
 
 ## 0.0.35 — 2026-10-21
 

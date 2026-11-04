@@ -818,7 +818,7 @@ static void enter_screen(p8p_menu_t *menu, int screen, int cursor) {
 static void open_common(p8p_menu_t *menu, p8p_runtime_t *runtime,
                         uint16_t physical_buttons, int cart_running,
                         int dim) {
-    const uint8_t *source = p8p_runtime_framebuffer(runtime);
+    const uint8_t *source = p8p_runtime_display_framebuffer(runtime);
     const uint8_t *palette = p8p_runtime_screen_palette(runtime);
     for (int i = 0; i < MENU_WIDTH * MENU_HEIGHT; ++i) {
         uint8_t color = palette ? palette[source[i] & 15] : source[i];

@@ -10,6 +10,7 @@
 #include "../src/runtime/runtime_internal.h"
 #include <lauxlib.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -420,6 +421,73 @@ static void print_shows_mapped_button_glyphs(void) {
     p8p_cart_destroy(&cart);
 }
 
+/* A loop-back pattern returns to the nearest loop-start pattern at or before
+ * it, and that start pattern plays again. */
+static void audio_music_loop_start(void) {
+    static uint8_t ram[0x10000];
+    struct { uint8_t flags[4]; int expected[6]; } cases[] = {
+        {{1, 1, 0, 2}, {0, 1, 2, 3, 1, 2}},
+        {{3, 0, 0, 0}, {0, 0, 0, 0, 0, 0}},
+        {{0, 0, 2, 0}, {0, 1, 2, 0, 1, 2}},
+    };
+    for (auto &test_case : cases) {
+        memset(ram, 0, sizeof(ram));
+        ram[0x3200 + 65] = 1;
+        for (unsigned pattern = 0; pattern < 4; ++pattern) {
+            uint8_t *song = ram + 0x3100 + pattern * 4;
+            uint8_t flags = test_case.flags[pattern];
+            song[0] = (flags & 1) ? 0x80 : 0;
+            song[1] = (flags & 2) ? 0xc0 : 0x40;
+            song[2] = song[3] = 0x40;
+        }
+        p8p_audio_t *audio = p8p_audio_create(ram);
+        CHECK(audio != NULL);
+        if (!audio)
+            continue;
+        p8p_audio_music(audio, 0, 0, 0);
+        int seen[6] = {p8p_audio_music_pattern(audio)};
+        int played = 1, count = p8p_audio_music_count(audio);
+        for (int step = 0; step < 200000 && played < 6; ++step) {
+            p8p_audio_skip(audio, 16);
+            if (p8p_audio_music_count(audio) != count) {
+                count = p8p_audio_music_count(audio);
+                seen[played++] = p8p_audio_music_pattern(audio);
+            }
+        }
+        CHECK(memcmp(seen, test_case.expected, sizeof(seen)) == 0);
+        p8p_audio_destroy(audio);
+    }
+}
+
+/* PICO-8 0.2.7 stops music on reaching a pattern whose four channels are all
+ * disabled, and music(n) on such a pattern plays nothing. */
+static void audio_music_empty_pattern(void) {
+    static uint8_t ram[0x10000];
+    memset(ram, 0, sizeof(ram));
+    ram[0x3200 + 65] = 1;
+    for (unsigned pattern = 0; pattern < 4; ++pattern) {
+        uint8_t *song = ram + 0x3100 + pattern * 4;
+        song[0] = pattern < 2 ? 0 : 0x40;
+        song[1] = song[2] = song[3] = 0x40;
+    }
+    p8p_audio_t *audio = p8p_audio_create(ram);
+    CHECK(audio != NULL);
+    if (!audio)
+        return;
+    p8p_audio_music(audio, 0, 0, 0);
+    int highest = 0;
+    for (int step = 0; step < 200000 && p8p_audio_music_pattern(audio) >= 0; ++step) {
+        p8p_audio_skip(audio, 16);
+        if (p8p_audio_music_pattern(audio) > highest)
+            highest = p8p_audio_music_pattern(audio);
+    }
+    CHECK(p8p_audio_music_pattern(audio) == -1);
+    CHECK(highest == 1);
+    p8p_audio_music(audio, 2, 0, 0);
+    CHECK(p8p_audio_music_pattern(audio) == -1);
+    p8p_audio_destroy(audio);
+}
+
 static void audio_chunk_boundaries(void) {
     enum { FRAMES = 4099 };
     static uint8_t ram[0x10000];
@@ -716,6 +784,24 @@ static void circles_match_pico8(void) {
             fprintf(stderr, "FAIL circfill radius %d differs from circ\n", radius);
         CHECK(matches);
     }
+    /* The walk stops once every remaining row is clipped.  A clipped circle
+     * must match the unclipped one on the rows left visible. */
+    {
+        uint8_t full[128 * 128];
+        memcpy(full, draw_shape(runtime, "circfill(64,30,50,7)"), sizeof(full));
+        const uint8_t *fb = draw_shape(runtime, "clip(0,0,128,40) circfill(64,30,50,7)");
+        int matches = 1;
+        for (int i = 0; i < 128 * 128; ++i)
+            if (fb[i] != (i < 40 * 128 ? full[i] : 0))
+                matches = 0;
+        CHECK(matches);
+        fb = draw_shape(runtime, "circfill(64,64,5000,7)");
+        int covered = 1;
+        for (int i = 0; i < 128 * 128; ++i)
+            if (fb[i] != 7)
+                covered = 0;
+        CHECK(covered);
+    }
     p8p_runtime_destroy(runtime);
 }
 
@@ -748,6 +834,591 @@ static void state_restores_fill_pattern(void) {
     CHECK(memcmp(p8p_runtime_framebuffer(runtime), patterned,
                  sizeof(patterned)) == 0);
     free(state);
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+/* A looping waveform at one key with the given volume and filter byte. */
+static void set_wave_sfx(uint8_t *ram, int sfx, unsigned waveform, unsigned key,
+                         unsigned volume, uint8_t filters) {
+    uint8_t *data = ram + 0x3200 + sfx * 68;
+    for (unsigned note = 0; note < 32; ++note) {
+        data[note * 2] = (uint8_t)(key | (waveform << 6));
+        data[note * 2 + 1] = (uint8_t)((volume << 1) | (waveform >> 2));
+    }
+    data[64] = filters;
+    data[65] = 1;
+    data[67] = 32;
+}
+
+static void set_square_sfx(uint8_t *ram, int sfx, unsigned volume, uint8_t filters) {
+    set_wave_sfx(ram, sfx, 3, 24, volume, filters);
+}
+
+static void render_voices(uint8_t *ram, int voices, const uint8_t *pcm, int pcm_count,
+                          int16_t *stereo, size_t frames) {
+    p8p_audio_t *audio = p8p_audio_create(ram);
+    CHECK(audio != NULL);
+    if (!audio)
+        return;
+    for (int channel = 0; channel < voices; ++channel)
+        p8p_audio_sfx(audio, channel, channel, 0, 32);
+    CHECK(p8p_audio_pcm_push(audio, pcm, pcm_count) == pcm_count);
+    p8p_audio_render(audio, stereo, frames);
+    p8p_audio_destroy(audio);
+}
+
+static void left_range(const int16_t *stereo, size_t frames, int *low, int *high) {
+    *low = *high = stereo[0];
+    for (size_t frame = 1; frame < frames; ++frame) {
+        if (stereo[frame * 2] < *low) *low = stereo[frame * 2];
+        if (stereo[frame * 2] > *high) *high = stereo[frame * 2];
+    }
+}
+
+static double left_rms(const int16_t *stereo, size_t first, size_t frames) {
+    double sum = 0;
+    for (size_t frame = first; frame < first + frames; ++frame)
+        sum += (double)stereo[frame * 2] * stereo[frame * 2];
+    return sqrt(sum / (double)frames);
+}
+
+/* PICO-8 0.2.7 moves each channel to a new volume in a straight line over 64
+ * of its samples, about 2.9 ms, when a sound starts, changes level and ends.
+ * A low triangle starts at its lowest point, so without that ramp the first
+ * sample jumps by the full amplitude and the speaker plays a click. */
+static void audio_volume_ramps(void) {
+    enum { FRAMES = 30000 };
+    static uint8_t ram[0x10000];
+    static int16_t stereo[FRAMES * 2];
+    memset(ram, 0, sizeof(ram));
+    set_wave_sfx(ram, 0, 0, 0, 0, 0);
+    uint8_t *data = ram + 0x3200;
+    data[1] = 7 << 1;
+    data[3] = 2 << 1;
+    data[65] = 16;
+    data[67] = 0;
+    render_voices(ram, 1, NULL, 0, stereo, FRAMES);
+    int largest_step = 0, loudest = 0;
+    for (size_t frame = 1; frame < FRAMES; ++frame) {
+        int step = abs(stereo[frame * 2] - stereo[frame * 2 - 2]);
+        if (step > largest_step) largest_step = step;
+        if (abs(stereo[frame * 2]) > loudest) loudest = abs(stereo[frame * 2]);
+    }
+    CHECK(loudest > 15000);
+    CHECK(largest_step < 600);
+    CHECK(stereo[(FRAMES - 1) * 2] == 0);
+
+    /* A dropped triangle stops wherever its pitch reaches zero, and the
+     * tilted saw after it starts elsewhere in its own cycle. */
+    set_wave_sfx(ram, 0, 1, 0, 7, 0);
+    data[0] = 0;
+    data[1] = (uint8_t)((7 << 1) | (3 << 4));
+    data[65] = 16;
+    data[67] = 0;
+    render_voices(ram, 1, NULL, 0, stereo, FRAMES);
+    largest_step = 0;
+    for (size_t frame = 1; frame < FRAMES; ++frame) {
+        int step = abs(stereo[frame * 2] - stereo[frame * 2 - 2]);
+        if (step > largest_step) largest_step = step;
+    }
+    CHECK(largest_step < 600);
+}
+
+static void audio_mix_level(void) {
+    enum { FRAMES = 4800, PCM_FRAMES = 200, REVERB_SHORT = 398 };
+    static uint8_t ram[0x10000];
+    static int16_t solo[FRAMES * 2], quad[FRAMES * 2], reverb[FRAMES * 2];
+    uint8_t pcm_low[64];
+    int low, high;
+    memset(pcm_low, 0, sizeof(pcm_low));
+    memset(ram, 0, sizeof(ram));
+    for (int sfx = 0; sfx < 4; ++sfx)
+        set_square_sfx(ram, sfx, 7, 0);
+
+    /* Full-volume peaks measured from PICO-8 0.2.7 output at C-2.  The saw is
+     * the square's 0.653/0.5, and the organ's lobes reach 1/3 of full scale. */
+    static const struct {
+        unsigned waveform;
+        int low, high;
+    } peaks[] = {
+        {0, -16120, 16120}, {1, -16120, 16120}, {2, -10530, 10530},
+        {3, -8060, 8060}, {4, -8060, 8060}, {5, -10750, 10750},
+    };
+    for (size_t index = 0; index < sizeof(peaks) / sizeof(peaks[0]); ++index) {
+        set_wave_sfx(ram, 0, peaks[index].waveform, 24, 7, 0);
+        render_voices(ram, 1, NULL, 0, solo, FRAMES);
+        left_range(solo, FRAMES, &low, &high);
+        CHECK(abs(low - peaks[index].low) < 200);
+        CHECK(abs(high - peaks[index].high) < 200);
+    }
+
+    /* The phaser's two triangles drift apart and back at about 2.4 Hz here,
+     * so its level falls by the time they are half a cycle apart. */
+    {
+        enum { PHASER_FRAMES = 12000 };
+        static int16_t phaser[PHASER_FRAMES * 2];
+        set_wave_sfx(ram, 0, 7, 24, 7, 0);
+        render_voices(ram, 1, NULL, 0, phaser, PHASER_FRAMES);
+        CHECK(left_rms(phaser, 0, 960) > left_rms(phaser, 10000, 960) * 2);
+    }
+
+    /* Noise is brown and level-dependent on pitch: RMS from PICO-8 0.2.7. */
+    {
+        static const struct { unsigned key; double rms; } levels[] = {
+            {12, 6403}, {33, 7658}, {57, 13090},
+        };
+        for (size_t index = 0; index < 3; ++index) {
+            set_wave_sfx(ram, 0, 6, levels[index].key, 7, 0);
+            render_voices(ram, 1, NULL, 0, solo, FRAMES);
+            double rms = left_rms(solo, 0, FRAMES);
+            CHECK(rms > levels[index].rms * 0.75 && rms < levels[index].rms * 1.25);
+        }
+    }
+
+    /* Volume is linear in steps of 1/7. */
+    set_wave_sfx(ram, 0, 0, 24, 1, 0);
+    render_voices(ram, 1, NULL, 0, solo, FRAMES);
+    left_range(solo, FRAMES, &low, &high);
+    CHECK(abs(high - 16120 / 7) < 40);
+
+    /* Four triangles in phase saturate instead of wrapping. */
+    for (int sfx = 0; sfx < 4; ++sfx)
+        set_wave_sfx(ram, sfx, 0, 24, 7, 0);
+    render_voices(ram, 1, NULL, 0, solo, FRAMES);
+    render_voices(ram, 4, NULL, 0, quad, FRAMES);
+    left_range(quad, FRAMES, &low, &high);
+    CHECK(low == -32768 && high == 32767);
+    for (size_t frame = 0; frame < FRAMES; ++frame)
+        CHECK((quad[frame * 2] > 0) == (solo[frame * 2] > 0));
+    for (int sfx = 0; sfx < 4; ++sfx)
+        set_square_sfx(ram, sfx, 7, 0);
+
+    /* serial() PCM is full scale, as in PICO-8: sample 0 is -32768. */
+    render_voices(ram, 0, pcm_low, sizeof(pcm_low), solo, PCM_FRAMES);
+    left_range(solo, PCM_FRAMES, &low, &high);
+    CHECK(low == -32768 && high == -16384);  /* the first output is a midpoint */
+    /* A voice adds to it while the square's first half period is positive. */
+    render_voices(ram, 1, pcm_low, sizeof(pcm_low), solo, PCM_FRAMES);
+    render_voices(ram, 1, NULL, 0, quad, PCM_FRAMES);
+    for (size_t frame = 2; frame < 90; ++frame)
+        CHECK(abs(solo[frame * 2] - (quad[frame * 2] - 32768)) <= 1);
+    CHECK(quad[89 * 2] > 2000);
+
+    /* Reverb still feeds back at one half.  Odd frames are the synthesized
+     * samples; each output is the dry voice plus half of the output one
+     * delay earlier, within the rounding of the unscaled delay line. */
+    set_square_sfx(ram, 0, 3, 0);
+    render_voices(ram, 1, NULL, 0, solo, FRAMES);
+    set_square_sfx(ram, 0, 3, 24);
+    render_voices(ram, 1, NULL, 0, reverb, FRAMES);
+    for (size_t sample = REVERB_SHORT; sample < FRAMES / 2; ++sample) {
+        int wet = reverb[(sample * 2 + 1) * 2];
+        int dry = solo[(sample * 2 + 1) * 2];
+        int delayed = reverb[((sample - REVERB_SHORT) * 2 + 1) * 2];
+        CHECK(abs(wet - dry - delayed / 2) <= 2);
+    }
+}
+
+/* Addresses wrap modulo 0x10000 as in PICO-8, so 0x8000-0xffff (negative in
+ * 16.16) are ordinary RAM and multi-byte accesses continue at 0x0000.  The
+ * same cart passes all 18 checks in PICO-8 0.2.7. */
+static void memory_addresses_wrap_like_pico8(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function _draw()\n"
+        " poke2(0x9000,0x1234) is(peek2(0x9000)==0x1234)\n"
+        " poke4(0x9010,0x1122.3344) is(peek4(0x9010)==0x1122.3344)\n"
+        " memset(0x9100,5,4) is(@0x9100==5 and @0x9103==5)\n"
+        " cls() rectfill(0,0,7,0,7) memcpy(0x9200,0x6000,4)\n"
+        " is(peek4(0x9200)==0x7777.7777)\n"
+        " memcpy(0x6040,0x9200,4) is(pget(0,1)==7)\n"
+        " poke(0x5f55,0x80) cls(3) poke(0x5f55,0x60) is(peek4(0x8000)==0x3333.3333)\n"
+        " poke4(0xfffe,0x1122.3344)\n"
+        " is(@0xfffe==0x44 and @0xffff==0x33 and @0==0x22 and @1==0x11)\n"
+        " is(peek4(0xfffe)==0x1122.3344)\n"
+        " poke2(0xffff,0x5566) is(@0xffff==0x66 and @0==0x55 and peek2(0xffff)==0x5566)\n"
+        " poke(0x10,0) memset(0xfff0,7,0x20)\n"
+        " is(@0xfff0==7 and @0xffff==7 and @0==7 and @0xf==7 and @0x10==0)\n"
+        " poke(0x9000,1,2,3,4) memcpy(0xfffe,0x9000,4)\n"
+        " is(@0xfffe==1 and @0xffff==2 and @0==3 and @1==4)\n"
+        " memcpy(0x9300,0xfffe,4) is(peek4(0x9300)==0x0403.0201)\n"
+        " poke(0x9400,9) memset(0x9400,1,-4) is(@0x9400==9)\n"
+        " poke(0xffff,9) poke(0,1,2,3)\n"
+        " is(peek2(-1)==265 and peek4(-1)==0x0302.0109)\n"
+        " poke(0x9000,5,6,7,8) memcpy(0x9001,0x9000,3)\n"
+        " is(@0x9000==5 and @0x9001==5 and @0x9002==6 and @0x9003==7)\n"
+        " memset(0x9400,9,4) reload(0x9400,0,4) is(peek4(0x9400)==0)\n"
+        " is(serial(0x808,0xffc0,128)==128 and stat(108)==128)\n"
+        " is(serial(0x808,0x8000,64)==64 and stat(108)==192)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 18; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL memory address case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void multi_value_peek_poke_matches_pico8(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function n(...) return select(\"#\",...) end\n"
+        "function _draw()\n"
+        " for i=0,15 do poke(0x8000+i,i+1) end\n"
+        " local a,b,c=peek2(0x8000,3) is(a==0x0201 and b==0x0403 and c==0x0605)\n"
+        " a,b=peek4(0x8000,2) is(a==0x0403.0201 and b==0x0807.0605)\n"
+        " is(n(peek2(0x8000))==1 and n(peek4(0x8000))==1 and n(peek(0x8000))==1)\n"
+        " is(n(peek2(0,0))==0 and n(peek4(0,nil))==0 and n(peek(0,-1))==0 and n(peek(0,nil))==0)\n"
+        " is(n(peek2(0,20))==20 and n(peek4(0,8193))==8193 and n(peek2(0,32767))==32767)\n"
+        " poke(0xffff,0xaa) poke(0,0xbb,0xcc,0xdd,0xee)\n"
+        " a,b=peek2(0xfffe,2) is(a==0xaa00 and b==0xccbb)\n"
+        " a,b=peek4(0xfffe,2) is(a==0xccbb.aa00 and b==0x0000.eedd)\n"
+        " poke2(0x9000,1,2,3) is(peek2(0x9000)==1 and peek2(0x9002)==2 and peek2(0x9004)==3)\n"
+        " poke4(0x9100,1,2) is(peek4(0x9100)==1 and peek4(0x9104)==2)\n"
+        " memset(0x9000,0x55,16) poke2(0x9000,1,nil,3) is(peek2(0x9002)==0 and peek2(0x9004)==3)\n"
+        " memset(0x9000,0x55,16) poke4(0x9000,1.5,nil,-2) is(peek4(0x9000)==1.5 and peek4(0x9004)==0 and peek4(0x9008)==-2)\n"
+        " memset(0x9000,0x55,4) poke2(0x9000) is(peek2(0x9000)==0 and @0x9002==0x55)\n"
+        " poke2(0xfffe,0x1111,0x2222) is(peek2(0xfffe)==0x1111 and peek2(0)==0x2222)\n"
+        " local args={0xa000} for i=1,300 do args[i+1]=i end poke2(unpack(args)) is(peek2(0xa000+2*299)==300)\n"
+        " cls() poke2(0x6000,0x1234,0x5678) is(pget(0,0)==4 and pget(3,0)==1 and pget(4,0)==8 and pget(7,0)==5)\n"
+        " a,b=peek2(0x6000,2) is(a==0x1234 and b==0x5678)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 16; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL multi-value peek/poke case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+/* map() with its size left out draws the whole map that 0x5f56/0x5f57
+ * select.  Each case puts sprite 1 (solid 7) in one cell, moves the camera
+ * onto it and reads pixel 0,0.  The same cart passes all 19 cases in
+ * PICO-8 0.2.7. */
+static void map_default_size_matches_pico8(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function probe(want,cx,cy,...)\n"
+        " cls() mset(cx,cy,1) camera(cx*8,cy*8) map(...) camera()\n"
+        " add(r,pget(0,0)==want) mset(cx,cy,0)\n"
+        "end\n"
+        "function _draw()\n"
+        " for x=0,7 do for y=0,7 do sset(8+x,y,7) end end\n"
+        " probe(7,127,31) probe(7,127,63) probe(7,16,0) probe(7,0,16)\n"
+        " probe(7,15,15) probe(0,0,64)\n"
+        " probe(7,127,31,0,0) probe(7,30,0,0,0,0,0)\n"
+        " probe(7,30,0,0,0,0,0,nil,nil) probe(7,0,30,0,0,0,0,40)\n"
+        " probe(0,0,0,0,0,0,0,0,0)\n"
+        " poke(0x5f56,0x80) poke(0x5f57,64)\n"
+        " probe(7,63,0) probe(7,63,255) probe(7,0,511) probe(0,64,0)\n"
+        " poke(0x5f57,0) probe(7,255,0) probe(7,255,127)\n"
+        " poke(0x5f56,0x20) poke(0x5f57,32) probe(7,31,0) probe(7,0,191)\n"
+        " poke(0x5f57,128)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 19; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL map default size case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void line_pen_matches_pico8(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function pen(x,y) return peek2(0x5f3c)==x and peek2(0x5f3e)==y end\n"
+        "function _draw()\n"
+        " cls() line(1,2,3,4,8) is(@0x5f35==0 and pen(3,4))\n"
+        " line() is(@0x5f35==1 and pen(3,4))\n"
+        " cls() line() line(5,5) is(pget(5,5)==0 and @0x5f35==0 and pen(5,5))\n"
+        " cls() line() line(5,5,9) is(pget(5,5)==0 and @0x5f25==9)\n"
+        " cls() line(1,1,3,3,8) line(6,3) is(pget(4,3)==8 and pget(6,3)==8 and pen(6,3))\n"
+        " cls() line(1,1,3,3,8) line(6,3,11) is(pget(3,3)==11 and pget(6,3)==11 and @0x5f25==11)\n"
+        " line(1,1,3,3,8) line(9) is(@0x5f25==9 and @0x5f35==1 and pen(3,3))\n"
+        " line(nil) is(@0x5f25==0 and @0x5f35==1)\n"
+        " cls() line(1,1,3,3,8) line(5,3,nil) is(@0x5f25==0 and pget(4,3)==0 and pen(5,3))\n"
+        " cls() line(1,1,3,3,8) poke2(0x5f3c,10) poke2(0x5f3e,2) line(12,2)\n"
+        " is(pget(10,2)==8 and pget(11,2)==8 and pget(4,3)==0)\n"
+        " cls() line(1,1,1,1,8) poke(0x5f35,5) line(4,1) is(pget(2,1)==0 and @0x5f35==0 and pen(4,1))\n"
+        " cls() line() poke(0x5f35,0) poke2(0x5f3c,0) poke2(0x5f3e,9) line(4,9,8) is(pget(0,9)==8 and pget(4,9)==8)\n"
+        " cls() camera(2,2) line(3,3,5,5,7) is(pen(5,5)) line(8,5) is(pget(7,5)==7) camera()\n"
+        " line(-5,-6,-7,-300,7) is(pen(-7,-300))\n"
+        " line(1.7,2.2,3.9,4.5,7) is(pen(3,4))\n"
+        " line(1,1,40000,2,7) is(pen(-25536,2))\n"
+        " cls() line(1,1,3,3,8) line(nil,nil,5,5) is(pget(0,0)==8 and pget(5,5)==8)\n"
+        " cls() line(1,8,3,nil,12) is(pget(3,0)==12 and pget(1,8)==12 and pen(3,0))\n"
+        " line(1,1,2,2,7) rect(5,5,6,6) circ(8,8,1) pset(9,9) print(\"a\",0,0) cls() is(@0x5f35==0 and pen(2,2))\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 20; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL line pen case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void reset_restores_boot_draw_state(void) {
+    /* Each case was checked against PICO-8 0.2.7.  reset() keeps the
+     * cursor (0x5f26-0x5f27) and print's margin (0x5f24); the RNG state at
+     * 0x5f44-0x5f4b is left out. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function rng(a) return a>=0x5f44 and a<=0x5f4b end\n"
+        "function _draw()\n"
+        " local boot={} for a=0x5f00,0x5f7f do boot[a]=@a end\n"
+        " for a=0x5f00,0x5f7f do if not rng(a) then poke(a,0x5a) end end\n"
+        " reset()\n"
+        " local bad=0 for a=0x5f00,0x5f7f do\n"
+        "  local want=(a==0x5f24 or a==0x5f26 or a==0x5f27) and 0x5a or boot[a]\n"
+        "  if not rng(a) and @a~=want then bad+=1 end\n"
+        " end\n"
+        " is(bad==0)\n"
+        " color(5) camera(3,4) pal(6,2) palt(0,false) fillp(0x5a5a) clip(1,2,3,4) cursor(9,9)\n"
+        " reset() is(@0x5f26==9 and @0x5f27==9)\n"
+        " cls() rectfill(0,0,3,3) is(pget(0,0)==6 and pget(1,0)==6 and pget(3,3)==6)\n"
+        " pset(127,127) is(pget(127,127)==6)\n"
+        " cls(1) spr(0,0,0) is(pget(0,0)==1)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 5; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL reset case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void stat_values_match_pico8(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function zeros(a,b) for i=a,b do if stat(i)~=0 then return false end end return true end\n"
+        "function nils(a,b) for i=a,b do if stat(i)~=nil then return false end end return true end\n"
+        "function _draw()\n"
+        " is(stat(3)==0 and stat(5)==43 and stat(10)==0 and stat(11)==1)\n"
+        " is(stat(12)==23 and stat(13)==39 and stat(14)==104 and stat(15)==88)\n"
+        " is(zeros(40,45) and zeros(58,63) and zeros(72,79) and zeros(86,89) and zeros(96,98))\n"
+        " is(nils(64,71) and stat(64.5)==nil and stat(100)==nil and stat(101)==nil)\n"
+        " is(stat(104)==false and stat(110)==false and stat(105)==0 and stat(107)==0)\n"
+        " is(stat(109)==256 and stat(111)==256 and stat(124)==\"/\")\n"
+        " is(zeros(112,119) and stat(123)==0 and zeros(125,255))\n"
+        " is(stat(-1)==0 and stat(256)==0 and stat(1000)==0 and stat(27)==0 and stat(37)==0)\n"
+        " memset(0x4300,128,512) for i=0,7 do serial(0x808,0x4300+i*64,64) end is(stat(108)==512)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 9; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL stat case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void hidden_builtins_match_pico8(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function n(...) return select(\"#\",...) end\n"
+        "names=split(\"_set_fps,_update_buttons,_get_menu_item_selected,_map_display,_mark_cpu,_startframe,__trace,holdframe,_update_framerate,set_draw_slice\",\",\",false)\n"
+        "function _draw()\n"
+        " local ok=true for k in all(names) do if type(_ENV[k])~=\"function\" then ok=false end end is(ok)\n"
+        " is(n(_set_fps(60))==0 and n(_set_fps\"60\")==0)\n"
+        " is(n(_update_buttons())==0 and n(_mark_cpu())==0 and n(_startframe())==0 and n(holdframe())==0)\n"
+        " is(n(_get_menu_item_selected())==0 and n(_update_framerate())==0 and n(set_draw_slice(0))==0)\n"
+        " is(_map_display()==true and _map_display(0)==true and _map_display(-1)==true)\n"
+        " is(_map_display(1)==false and _map_display(2)==false)\n"
+        " is(type(__trace())==\"string\")\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 7; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL hidden built-in case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void btnp_repeat_bytes_start_at_zero(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function _draw()\n"
+        " is(peek(0x5f5c)==0 and peek(0x5f5d)==0)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 1; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL btnp repeat byte case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void screen_palette_keeps_raw_bytes(void) {
+    /* Each case was checked against PICO-8 0.2.7. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function _draw()\n"
+        " is(pal(9,-7,1)==9 and @0x5f19==0xf9)\n"
+        " is(pal(9,0x99,1)==0xf9 and @0x5f19==0x99)\n"
+        " is(pal(9,0x1c3,1)==0x99 and @0x5f19==0xc3)\n"
+        " pal({[9]=0xf9,[3]=0x75},1) is(@0x5f19==0xf9 and @0x5f13==0x75)\n"
+        " pal(9,9,1) pal(3,3,1)\n"
+        " is(pal(9,0x1c)==9 and @0x5f09==0xc and pal(9,-7)==0xc and @0x5f09==9)\n"
+        " pal(9,0x99,1) pal() is(@0x5f19==9 and @0x5f09==9)\n"
+        " poke(0x5f19,0x19) pal() is(@0x5f19==9)\n"
+        " poke(0x5f19,0xf9) is(pal(9,9,1)==0xf9 and @0x5f19==9)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n"
+        ;
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 8; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL screen palette byte case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void set_fps_paces_top_level_flips(void) {
+    /* Measured in PICO-8 0.2.7: _set_fps(60) before the main loop makes each
+     * flip() advance time() by 1/60 s, _set_fps(30) by 1/30 s with time()
+     * continuing smoothly, and the main loop then picks the rate from
+     * _update60 again. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "_set_fps(60) for i=1,60 do flip() end t1=time() s1=stat(7)\n"
+        "_set_fps(30) for i=1,30 do flip() end t2=time() s2=stat(7)\n"
+        "function _update() end\n"
+        "function _draw() cls()\n"
+        " pset(0,0,(t1>0.98 and t1<1.05) and 11 or 8)\n"
+        " pset(1,0,(t2-t1>0.96 and t2-t1<1.04) and 11 or 8)\n"
+        " pset(2,0,(s1==60 and s2==30 and stat(7)==30) and 11 or 8)\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    for (int step = 0; step < 100; ++step)
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 3; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL _set_fps case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
     p8p_runtime_destroy(runtime);
     p8p_cart_destroy(&cart);
 }
@@ -827,6 +1498,55 @@ static void draw_palette_transitions(void) {
         p8p_runtime_destroy(runtime);
         p8p_cart_destroy(&cart);
     }
+}
+
+/* spr() and map() share an 8x8 tile blitter; sspr() at unit scale is a
+ * separate path.  Every alignment, clip edge, camera offset and transparency
+ * or palette mode must render the same pixels through both. */
+static void tile_blitter_matches_sspr(void) {
+    static const char text[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _init() srand(7)\n"
+        " for s=1,8 do for y=0,7 do local kind=(s+y)%4 for x=0,7 do\n"
+        "  local c=kind==0 and 0 or kind==1 and 1+flr(rnd(15)) or flr(rnd(16))\n"
+        "  if kind==3 and x%3==0 then c=0 end\n"
+        "  sset(s%16*8+x,s\\16*8+y,c) end end end\n"
+        " for my=0,15 do for mx=0,15 do mset(mx,my,1+(mx+my*3)%8) end end end\n"
+        "function tile(s,x,y) if btn(0) then sspr(s%16*8,s\\16*8,8,8,x,y) else spr(s,x,y) end end\n"
+        "function _draw() clip() pal() camera() cls(5)\n"
+        " if btn(1) then clip(13,7,100,90) end\n"
+        " if btn(2) then palt(0,false) palt(3,true) end\n"
+        " if btn(3) then pal(5,9) pal(12,1) end\n"
+        " if btn(4) then camera(3,-2) end\n"
+        " if btn(5) then\n"
+        "  if btn(0) then for my=0,15 do for mx=0,15 do tile(mget(mx,my),mx*8-3,my*8+5) end end\n"
+        "  else map(0,0,-3,5,16,16) end\n"
+        " else local i=0 for y=-3,125,11 do for x=-5,125,9 do tile(1+i%8,x,y) i+=1 end end end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    if (!runtime) return;
+    int loaded = p8p_cart_load_text_memory((const uint8_t *)text, strlen(text), &cart);
+    if (loaded == 0) loaded = p8p_runtime_load(runtime, &cart);
+    CHECK(loaded == 0);
+    for (int options = 0; loaded == 0 && options < 32; ++options) {
+        uint8_t blitted[128 * 128];
+        CHECK(p8p_runtime_step(runtime, (uint8_t)(options << 1)) == 0);
+        memcpy(blitted, p8p_runtime_framebuffer(runtime), sizeof(blitted));
+        CHECK(p8p_runtime_step(runtime, (uint8_t)(options << 1 | 1)) == 0);
+        const uint8_t *reference = p8p_runtime_framebuffer(runtime);
+        int differing = 0, drawn = 0;
+        for (int pixel = 0; pixel < 128 * 128; ++pixel) {
+            differing += blitted[pixel] != reference[pixel];
+            drawn += reference[pixel] != 5;
+        }
+        CHECK(drawn > 1000);
+        CHECK(differing == 0);
+        if (differing) fprintf(stderr, "tile blitter options=%d differing=%d\n", options, differing);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
 }
 
 static void test_terminal_nul_source(void) {
@@ -1205,15 +1925,30 @@ int main(void) {
     palette_leaf_contracts();
     palette_fast_path_semantics();
     draw_palette_transitions();
+    set_fps_paces_top_level_flips();
+    screen_palette_keeps_raw_bytes();
+    btnp_repeat_bytes_start_at_zero();
+    hidden_builtins_match_pico8();
+    stat_values_match_pico8();
+    reset_restores_boot_draw_state();
+    line_pen_matches_pico8();
+    map_default_size_matches_pico8();
+    multi_value_peek_poke_matches_pico8();
+    memory_addresses_wrap_like_pico8();
     update_callbacks_follow_init();
     secondary_palette_matches_pico8();
     circles_match_pico8();
     state_restores_fill_pattern();
+    tile_blitter_matches_sspr();
     audio_chunk_boundaries();
     menu_glyphs_follow_pico8_font();
     menu_draws_pocket_glyphs();
     menus_share_buttons_and_cart_rows();
     print_shows_mapped_button_glyphs();
+    audio_music_loop_start();
+    audio_music_empty_pattern();
+    audio_volume_ramps();
+    audio_mix_level();
     static const uint8_t source[] =
         "pico-8 cartridge // http://www.pico-8.com\n"
         "version 42\n"
@@ -1802,7 +2537,35 @@ int main(void) {
         CHECK(p8p_runtime_framebuffer(runtime)[5] == 7);
 
         {
+            /* Argument handling measured from PICO-8 0.2.7. Each check sets a
+             * pixel from what stat(46..49) reports straight after the call. */
+            static const char arguments_source[] =
+                "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+                "for n in all(split\"0,2,3,63\") do poke(0x3241+n*68,16)\n"
+                "poke2(0x3200+n*68,24+(1<<6)+(5<<9)) end\n"
+                "function _draw() cls()\n"
+                "sfx(2) sfx() if stat(47)==-1 then pset(0,0,7) end sfx(-1)\n"
+                "sfx(2) sfx(3,nil) if stat(46)==3 and stat(47)==-1 then pset(1,0,7) end sfx(-1)\n"
+                "sfx(64) if stat(46)==63 then pset(2,0,7) end sfx(-1)\n"
+                "sfx(-3) if stat(46)==0 then pset(3,0,7) end sfx(-1)\n"
+                "if sfx(-1)==-1 then pset(4,0,7) end\n"
+                "end\n";
+            p8p_cart_t arguments_cart = {};
+            CHECK(p8p_cart_load_text_memory((const uint8_t *)arguments_source,
+                                            sizeof(arguments_source) - 1,
+                                            &arguments_cart) == 0);
+            CHECK(p8p_runtime_load(runtime, &arguments_cart) == 0);
+            CHECK(p8p_runtime_step(runtime, 0) == 0);
+            const uint8_t *pixels = p8p_runtime_framebuffer(runtime);
+            for (int x = 0; x < 5; ++x)
+                CHECK(pixels[x] == 7);
+            p8p_cart_destroy(&arguments_cart);
+        }
+
+        {
             int plain = audio_crossings_for(runtime, "sfx(2)");
+            /* A nil index means sfx 0, not the stop command sfx(-1). */
+            CHECK(audio_crossings_for(runtime, "sfx(2) sfx(nil)") > 0);
             uint32_t plain_hash = last_audio_hash;
             int custom = audio_crossings_for(runtime, "sfx(1)");
             int octave = audio_crossings_for(runtime, "sfx(4)");
@@ -2180,6 +2943,60 @@ int main(void) {
             CHECK(p8p_runtime_step(runtime, 0) == 0);
             CHECK(p8p_runtime_take_pause_request(runtime) == 1);
             p8p_cart_destroy(&suppress_cart);
+        }
+
+        {
+            /* 0x5f2c transforms the whole screen at presentation.  One pixel
+             * at (10,20) must land exactly on the listed display pixels. */
+            static const struct {
+                int mode;
+                int count;
+                int pixels[4][2];
+            } screen_modes[] = {
+                {0, 1, {{10, 20}}},
+                {1, 2, {{20, 20}, {21, 20}}},
+                {2, 2, {{10, 40}, {10, 41}}},
+                {3, 4, {{20, 40}, {21, 40}, {20, 41}, {21, 41}}},
+                {4, 1, {{10, 20}}},
+                {5, 2, {{10, 20}, {117, 20}}},
+                {6, 2, {{10, 20}, {10, 107}}},
+                {7, 4, {{10, 20}, {117, 20}, {10, 107}, {117, 107}}},
+                {67, 4, {{20, 40}, {21, 40}, {20, 41}, {21, 41}}},
+                {128, 1, {{10, 20}}},
+                {129, 1, {{117, 20}}},
+                {130, 1, {{10, 107}}},
+                {131, 1, {{117, 107}}},
+                {132, 1, {{10, 20}}},
+                {133, 1, {{107, 10}}},
+                {134, 1, {{117, 107}}},
+                {135, 1, {{20, 117}}},
+            };
+            for (const auto &screen_mode : screen_modes) {
+                char mode_source[256];
+                snprintf(mode_source, sizeof(mode_source),
+                         "pico-8 cartridge // http://www.pico-8.com\n"
+                         "version 42\n__lua__\n"
+                         "poke(0x5f2c,%d)\n"
+                         "function _draw() cls() pset(10,20,8) end\n",
+                         screen_mode.mode);
+                p8p_cart_t mode_cart = {};
+                CHECK(p8p_cart_load_text_memory((const uint8_t *)mode_source,
+                                                strlen(mode_source),
+                                                &mode_cart) == 0);
+                CHECK(p8p_runtime_load(runtime, &mode_cart) == 0);
+                CHECK(p8p_runtime_step(runtime, 0) == 0);
+                const uint8_t *shown = p8p_runtime_display_framebuffer(runtime);
+                int lit = 0;
+                for (int pixel = 0; pixel < 128 * 128; ++pixel)
+                    lit += shown[pixel] == 8;
+                CHECK(lit == screen_mode.count);
+                for (int index = 0; index < screen_mode.count; ++index)
+                    CHECK(shown[screen_mode.pixels[index][1] * 128 +
+                                screen_mode.pixels[index][0]] == 8);
+                /* Screen memory keeps the normal layout. */
+                CHECK(p8p_runtime_framebuffer(runtime)[20 * 128 + 10] == 8);
+                p8p_cart_destroy(&mode_cart);
+            }
         }
 
         {

@@ -125,7 +125,11 @@ Implemented and covered by host tests:
   big-map memory, draw-state aliases and 8/16/32-bit memory APIs;
 - persistent `cartdata`, `dget` and `dset` records in Pocket save storage;
 - four-channel `sfx`/`music` playback (synthesized at 24 kHz, output at 48 kHz) with built-in waveforms, loops,
-  music patterns, fades and the standard note effects;
+  music patterns, fades and the standard note effects. One full-volume square
+  voice peaks at +/-16384, calibrated against a single PICO-8 v0.2.7 `.wav` export
+  of one cart's music (median peak per second within about 1%). The gain follows the
+  per-channel reverb and dampen stages, the mix saturates at 16 bits, and
+  `serial()` PCM stays at +/-8192 because no export has measured it;
 - Eris-based Lua state persistence together with RAM, renderer, input, RNG and
   audio state, compressed per cartridge with state previews;
 - offline `load("#id", breadcrumb, parameters)`, `stat(6)` parameters,
@@ -136,6 +140,10 @@ Implemented and covered by host tests:
   2000 as no date;
 - P8SCII control codes, default attributes at `0x5f58`-`0x5f5b` and custom
   fonts at `0x5600`, checked pixel by pixel against PICO-8 0.2.7 (see below);
+- `0x5f2c` screen modes 1-3 (stretch), 5-7 (mirror), 129-131 (flip) and 133-135
+  (rotate), applied to the whole screen at presentation. Bit 6 is ignored, and
+  other values show the normal screen. The official manual does not document
+  this register; the mode list comes from the PICO-8 wiki;
 - 120 error-free headless frames of the official Celeste Classic cart.
 
 P8SCII behaviour was measured on PICO-8 0.2.7 with a differential harness that

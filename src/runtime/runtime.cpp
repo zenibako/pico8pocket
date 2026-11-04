@@ -86,8 +86,7 @@ static void update_palette_default_flags(p8p_runtime_t *runtime) {
     int palettes_default = 1;
     int transparency_default = runtime->transparent[0] != 0;
     for (int i = 0; i < 16; ++i) {
-        if (runtime->draw_palette[i] != i ||
-            runtime->screen_palette[i] != i)
+        if (runtime->draw_palette[i] != i || runtime->ram[0x5f10 + i] != i)
             palettes_default = 0;
         if (i && runtime->transparent[i])
             transparency_default = 0;
@@ -163,6 +162,11 @@ static int32_t arg_int(lua_State *lua, int index, int32_t fallback) {
     return (int32_t)lua_tonumber(lua, index);
 }
 
+static void set_pen_color(p8p_runtime_t *runtime, int32_t color) {
+    runtime->draw_color = color & 255;
+    runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
+}
+
 /* A colour argument to a drawing call also becomes the pen colour, as in
  * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
 static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
@@ -171,8 +175,7 @@ static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
         return runtime->draw_color;
     int32_t color = ttisnumber(value) ? (int32_t)nvalue(value) :
                                         (int32_t)lua_tonumber(lua, index);
-    runtime->draw_color = color & 255;
-    runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
+    set_pen_color(runtime, color);
     return color;
 }
 
@@ -494,11 +497,24 @@ static void draw_state_to_ram(p8p_runtime_t *runtime) {
     runtime->ram[0x5f33] = runtime->fill_pattern_flags;
 }
 
-static void palette_entry_to_ram(p8p_runtime_t *runtime, int color) {
+static void draw_palette_entry_to_ram(p8p_runtime_t *runtime, int color) {
     runtime->ram[0x5f00 + color] =
         (uint8_t)(runtime->draw_palette[color] |
                   (runtime->transparent[color] ? 0x10 : 0));
-    runtime->ram[0x5f10 + color] = runtime->screen_palette[color];
+}
+
+/* pal(c, v, 1) keeps v's low byte at 0x5f10 + c and returns the byte it
+ * replaced, as PICO-8 does; the display uses the colour bits (0x8f). */
+static int set_screen_palette_entry(p8p_runtime_t *runtime, int color,
+                                    int value) {
+    uint8_t raw = (uint8_t)value;
+    int previous = runtime->ram[0x5f10 + color];
+    if (previous != raw) {
+        runtime->ram[0x5f10 + color] = raw;
+        runtime->screen_palette[color] = raw & 0x8f;
+        runtime->palettes_default = 0;
+    }
+    return previous;
 }
 
 static void cursor_to_ram(p8p_runtime_t *runtime) {
@@ -514,6 +530,24 @@ static void camera_to_ram(p8p_runtime_t *runtime) {
 }
 
 static void sync_draw_target(p8p_runtime_t *runtime);
+
+/* The draw state at 0x5f00-0x5f7f as a cartridge starts. */
+static void draw_state_defaults_to_ram(p8p_runtime_t *runtime) {
+    uint8_t *ram = runtime->ram;
+    memset(ram + 0x5f00, 0, 0x80);
+    for (int i = 0; i < 16; ++i) {
+        ram[0x5f00 + i] = (uint8_t)i;
+        ram[0x5f10 + i] = (uint8_t)i;
+    }
+    ram[0x5f00] |= 0x10;  /* colour 0 is transparent */
+    ram[0x5f22] = ram[0x5f23] = 128;
+    ram[0x5f25] = 6;
+    ram[0x5f55] = 0x60;
+    ram[0x5f56] = 0x20;
+    ram[0x5f57] = 128;
+    ram[0x5f5e] = 0xff;
+    reset_secondary_palette(runtime);
+}
 
 static void draw_state_from_ram(p8p_runtime_t *runtime) {
     sync_draw_target(runtime);
@@ -540,6 +574,79 @@ static void draw_state_from_ram(p8p_runtime_t *runtime) {
     set_fill_pattern(runtime, (uint16_t)(runtime->ram[0x5f31] |
                                          ((uint16_t)runtime->ram[0x5f32] << 8)),
                      runtime->ram[0x5f33]);
+}
+
+/*
+ * PICO-8 addresses wrap modulo 0x10000: 0x8000-0xffff arrive as negative
+ * 16.16 numbers, and a range that passes 0xffff continues at 0x0000.
+ */
+#define RAM_SIZE 0x10000
+
+/* Bring the framebuffer, draw state and cartdata up to date after 'length'
+ * RAM bytes from 'address' were written; the range may wrap. */
+static void ram_written(p8p_runtime_t *runtime, int address, int length) {
+    address &= 0xffff;
+    while (length > 0) {
+        int chunk = length < RAM_SIZE - address ? length : RAM_SIZE - address;
+        if (range_touches_screen(address, chunk))
+            ram_to_screen_range(runtime, address, chunk);
+        if (range_touches_draw_state(address, chunk))
+            draw_state_from_ram(runtime);
+        if (range_touches_cartdata(address, chunk))
+            cartdata_mark_dirty(runtime);
+        length -= chunk;
+        address = 0;
+    }
+}
+
+static int ram_length(int length) {
+    return length < 0 ? 0 : length > RAM_SIZE ? RAM_SIZE : length;
+}
+
+static void ram_fill(p8p_runtime_t *runtime, int address, int value,
+                     int length) {
+    address &= 0xffff;
+    while (length > 0) {
+        int chunk = length < RAM_SIZE - address ? length : RAM_SIZE - address;
+        memset(runtime->ram + address, value, (size_t)chunk);
+        length -= chunk;
+        address = 0;
+    }
+}
+
+/* memmove() with wrapping ranges: a destination that starts inside the
+ * source copies from the end, so overlapping bytes are read before they are
+ * overwritten. */
+static void ram_move(p8p_runtime_t *runtime, int destination, int source,
+                     int length) {
+    destination &= 0xffff;
+    source &= 0xffff;
+    if (destination + length <= RAM_SIZE && source + length <= RAM_SIZE) {
+        memmove(runtime->ram + destination, runtime->ram + source,
+                (size_t)length);
+    } else if (((destination - source) & 0xffff) < length) {
+        for (int i = length - 1; i >= 0; --i)
+            runtime->ram[(destination + i) & 0xffff] =
+                runtime->ram[(source + i) & 0xffff];
+    } else {
+        for (int i = 0; i < length; ++i)
+            runtime->ram[(destination + i) & 0xffff] =
+                runtime->ram[(source + i) & 0xffff];
+    }
+}
+
+static uint32_t ram_read(const p8p_runtime_t *runtime, int address,
+                         int bytes) {
+    uint32_t value = 0;
+    for (int i = bytes - 1; i >= 0; --i)
+        value = (value << 8) | runtime->ram[(address + i) & 0xffff];
+    return value;
+}
+
+static void ram_write(p8p_runtime_t *runtime, int address, uint32_t value,
+                      int bytes) {
+    for (int i = 0; i < bytes; ++i, value >>= 8)
+        runtime->ram[(address + i) & 0xffff] = (uint8_t)value;
 }
 
 static uint8_t screen_get(const p8p_runtime_t *runtime, int x, int y) {
@@ -648,11 +755,19 @@ static void sprite_set(p8p_runtime_t *runtime, int x, int y, uint8_t color) {
     }
 }
 
-static uint8_t map_get(const p8p_runtime_t *runtime, int x, int y) {
-    int width = runtime->ram[0x5f57] ? runtime->ram[0x5f57] : 256;
+/* Cells in the map that 0x5f56 (address) and 0x5f57 (width) select. */
+static void map_dimensions(const p8p_runtime_t *runtime, int *width,
+                           int *height) {
     int mapping = runtime->ram[0x5f56];
     int size = mapping >= 0x80 ? 0x10000 - (mapping << 8) : 8192;
-    int height = size / width;
+    *width = runtime->ram[0x5f57] ? runtime->ram[0x5f57] : 256;
+    *height = size / *width;
+}
+
+static uint8_t map_get(const p8p_runtime_t *runtime, int x, int y) {
+    int width, height;
+    map_dimensions(runtime, &width, &height);
+    int mapping = runtime->ram[0x5f56];
     if (x < 0 || y < 0 || x >= width || y >= height)
         return 0;
     int index = y * width + x;
@@ -663,10 +778,9 @@ static uint8_t map_get(const p8p_runtime_t *runtime, int x, int y) {
 }
 
 static void map_set(p8p_runtime_t *runtime, int x, int y, uint8_t value) {
-    int width = runtime->ram[0x5f57] ? runtime->ram[0x5f57] : 256;
+    int width, height;
+    map_dimensions(runtime, &width, &height);
     int mapping = runtime->ram[0x5f56];
-    int size = mapping >= 0x80 ? 0x10000 - (mapping << 8) : 8192;
-    int height = size / width;
     if (x < 0 || y < 0 || x >= width || y >= height)
         return;
     int index = y * width + x;
@@ -938,21 +1052,60 @@ static int api_sset(lua_State *lua) {
 static int api_color(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     int previous = active_runtime->draw_color;
-    if (arg_count(lua) >= 1)
-        active_runtime->draw_color = arg_int(lua, 1, 6) & 255;
-    active_runtime->ram[0x5f25] = (uint8_t)active_runtime->draw_color;
+    set_pen_color(active_runtime,
+                  arg_count(lua) >= 1 ? arg_int(lua, 1, 6) : previous);
     push_int(lua, previous);
     return 1;
+}
+
+/*
+ * line() keeps its pen in draw-state RAM, as PICO-8 does: 0x5f3c and 0x5f3e
+ * hold the last endpoint as signed 16-bit values, and a nonzero 0x5f35 means
+ * there is none, so the next line(x, y) only moves the pen.  The argument
+ * count picks the form: line() and line(c) lift the pen, line(x, y[, c])
+ * continues from it, and four or more arguments draw a whole line.
+ */
+static int16_t line_pen_get(const p8p_runtime_t *runtime, int address) {
+    return (int16_t)(runtime->ram[address] | (runtime->ram[address + 1] << 8));
+}
+
+static void line_pen_set(p8p_runtime_t *runtime, int x, int y) {
+    runtime->ram[0x5f35] = 0;
+    runtime->ram[0x5f3c] = (uint8_t)x;
+    runtime->ram[0x5f3d] = (uint8_t)(x >> 8);
+    runtime->ram[0x5f3e] = (uint8_t)y;
+    runtime->ram[0x5f3f] = (uint8_t)(y >> 8);
 }
 
 static int api_line(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     p8p_runtime_t *runtime = active_runtime;
+    int count = arg_count(lua);
+    if (count < 2) {
+        if (count == 1)
+            set_pen_color(runtime, arg_int(lua, 1, 0));
+        runtime->ram[0x5f35] = 1;
+        return 0;
+    }
+    if (count < 4) {
+        int x1 = arg_int(lua, 1, 0);
+        int y1 = arg_int(lua, 2, 0);
+        int color = count == 3 ? arg_int(lua, 3, 0) : runtime->draw_color;
+        set_pen_color(runtime, color);
+        int pen_lifted = runtime->ram[0x5f35];
+        int x0 = line_pen_get(runtime, 0x5f3c);
+        int y0 = line_pen_get(runtime, 0x5f3e);
+        line_pen_set(runtime, x1, y1);
+        if (!pen_lifted)
+            draw_line(runtime, x0, y0, x1, y1, color);
+        return 0;
+    }
     int x0 = arg_int(lua, 1, 0);
     int y0 = arg_int(lua, 2, 0);
-    int x1 = arg_int(lua, 3, x0);
-    int y1 = arg_int(lua, 4, y0);
+    int x1 = arg_int(lua, 3, 0);
+    int y1 = arg_int(lua, 4, 0);
     int color = arg_pen(lua, 5, runtime);
+    line_pen_set(runtime, x1, y1);
     draw_line(runtime, x0, y0, x1, y1, color);
     return 0;
 }
@@ -1165,7 +1318,13 @@ static int api_circfill(lua_State *lua) {
     int x = radius;
     int y = 0;
     int error = 1 - radius;
-    while (x >= y) {
+    /* Past this offset, rows on both sides of the centre are clipped.  Every
+     * row the walk fills is at offset y or x, and x >= y, so once y passes it
+     * nothing left is visible: a huge circle centred on screen stops after
+     * at most a screen's height of steps. */
+    int last_offset = circle.sy - circle.clip_y0 > circle.clip_y1 - circle.sy ?
+        circle.sy - circle.clip_y0 : circle.clip_y1 - circle.sy;
+    while (x >= y && y <= last_offset) {
         fill_circle_rows(&circle, y, x);
         ++y;
         if (error < 0) {
@@ -1478,6 +1637,48 @@ static int api_fset(lua_State *lua) {
     return 0;
 }
 
+#if __BYTE_ORDER__ != __ORDER_LITTLE_ENDIAN__
+#error "blit_tile_rows packs pixels as little-endian words"
+#endif
+
+/* Four packed sprite pixels (two bytes) as four framebuffer bytes, first
+ * pixel in the low byte. */
+static inline uint32_t unpack_four_pixels(uint32_t packed) {
+    uint32_t spread = (packed & 0xff) | (packed & 0xff00) << 8;
+    return (spread & 0x000f000fu) | (spread & 0x00f000f0u) << 4;
+}
+
+/* Colour 0 is transparent in the default draw state. */
+static inline void store_four_pixels(uint8_t *destination, uint32_t pixels) {
+    if (!pixels)
+        return;
+    uint32_t has_transparent = (pixels - 0x01010101u) & ~pixels & 0x80808080u;
+    if (!has_transparent && !((uintptr_t)destination & 3)) {
+        memcpy(__builtin_assume_aligned(destination, 4), &pixels, 4);
+        return;
+    }
+    for (int i = 0; i < 4; ++i, pixels >>= 8)
+        if (pixels & 15) destination[i] = (uint8_t)pixels;
+}
+
+/* Horizontally unclipped rows in the default draw state: one word read per
+ * eight pixels, skipping transparent rows and writing opaque runs as words.
+ * Sprite rows are word aligned: RAM is (static_assert), the sheet base is a
+ * multiple of 256 and each tile starts at a multiple of four bytes.  Kept out
+ * of line: BRAM has no room for it, and the loop stays hot in the I-cache. */
+static __attribute__((noinline)) void blit_tile_rows(const uint8_t *source, uint8_t *destination,
+                                  int rows) {
+    source = (const uint8_t *)__builtin_assume_aligned(source, 4);
+    for (int y = 0; y < rows; ++y, source += 64, destination += 128) {
+        uint32_t packed;
+        memcpy(&packed, source, 4);
+        if (!packed)
+            continue;
+        store_four_pixels(destination, unpack_four_pixels(packed & 0xffff));
+        store_four_pixels(destination + 4, unpack_four_pixels(packed >> 16));
+    }
+}
+
 /* map() spends most of its time dispatching hundreds of ordinary 8x8 tiles.
  * Keep that hot path separate from the fully general scaled/flipped sprite
  * renderer so it does not rebuild the same width, height and camera state for
@@ -1503,6 +1704,14 @@ static P8P_FASTTEXT void blit_tile(p8p_runtime_t *runtime, int sprite,
     if (!runtime->palettes_default && runtime->transparency_default)
         default_colors = p8p_draw_palette_identity(runtime->draw_palette);
     runtime->screen_ram_dirty = 1;
+    if (default_colors && start_x == 0 && end_x == 8) {
+        blit_tile_rows(runtime->ram + sprite_base + (source_y + start_y) * 64 +
+                           source_x / 2,
+                       runtime->framebuffer + (screen_y + start_y) * 128 +
+                           screen_x,
+                       end_y - start_y);
+        return;
+    }
     for (int y = start_y; y < end_y; ++y) {
         const uint8_t *source = runtime->ram + sprite_base +
             (source_y + y) * 64 + source_x / 2;
@@ -1558,8 +1767,10 @@ static int api_map(lua_State *lua) {
     int cell_y = arg_int(lua, 2, 0);
     int screen_x = arg_int(lua, 3, 0);
     int screen_y = arg_int(lua, 4, 0);
-    int cell_w = arg_int(lua, 5, 16);
-    int cell_h = arg_int(lua, 6, 16);
+    int map_w, map_h;
+    map_dimensions(runtime, &map_w, &map_h);  /* PICO-8 draws the whole map */
+    int cell_w = arg_int(lua, 5, map_w);
+    int cell_h = arg_int(lua, 6, map_h);
     int layer = arg_int(lua, 7, 0);
     int origin_x = screen_x - runtime->camera_x;
     int origin_y = screen_y - runtime->camera_y;
@@ -1666,7 +1877,8 @@ extern "C" __attribute__((noinline)) int p8p_api_pal_full(lua_State *lua) {
             for (int i = 0; i < 16; ++i) {
                 runtime->draw_palette[i] = (uint8_t)i;
                 runtime->screen_palette[i] = (uint8_t)i;
-                palette_entry_to_ram(runtime, i);
+                runtime->ram[0x5f10 + i] = (uint8_t)i;
+                draw_palette_entry_to_ram(runtime, i);
             }
             reset_secondary_palette(runtime);
             runtime->palettes_default = 1;
@@ -1679,34 +1891,40 @@ extern "C" __attribute__((noinline)) int p8p_api_pal_full(lua_State *lua) {
         while (lua_next(lua, 1) != 0) {
             if (lua_isnumber(lua, -2) && lua_isnumber(lua, -1)) {
                 int from = (int)lua_tonumber(lua, -2) & 15;
-                int to = (int)lua_tonumber(lua, -1) &
-                         (target == 2 ? 0xff : screen ? 0x8f : 15);
-                uint8_t *entry =
-                    target == 2 ? &runtime->ram[P8P_SECONDARY_PALETTE + from] :
-                    screen ? &runtime->screen_palette[from] :
-                             &runtime->draw_palette[from];
-                if (*entry != (uint8_t)to) {
-                    *entry = (uint8_t)to;
+                int value = (int)lua_tonumber(lua, -1);
+                if (target == 2) {
+                    uint8_t *entry = &runtime->ram[P8P_SECONDARY_PALETTE + from];
+                    if (*entry != (uint8_t)value) {
+                        *entry = (uint8_t)value;
+                        runtime->palettes_default = 0;
+                    }
+                } else if (screen) {
+                    set_screen_palette_entry(runtime, from, value);
+                } else if (runtime->draw_palette[from] != (value & 15)) {
+                    runtime->draw_palette[from] = (uint8_t)(value & 15);
                     runtime->palettes_default = 0;
-                    palette_entry_to_ram(runtime, from);
+                    draw_palette_entry_to_ram(runtime, from);
                 }
             }
             lua_pop(lua, 1);
         }
+        if (target == 2 && !runtime->palettes_default)
+            update_palette_default_flags(runtime);
     } else if (arg_count(lua) == 1) {
         /* pal(p) resets one palette, and pal(0) also resets transparency. */
         if (palette == 2) {
             reset_secondary_palette(runtime);
             update_palette_default_flags(runtime);
         } else if (palette == 0 || palette == 1) {
-            uint8_t *entries = palette ? runtime->screen_palette
-                                       : runtime->draw_palette;
             for (int i = 0; i < 16; ++i) {
-                if (entries[i] != i) {
-                    entries[i] = (uint8_t)i;
-                    palette_entry_to_ram(runtime, i);
+                if (palette) {
+                    set_screen_palette_entry(runtime, i, i);
+                } else if (runtime->draw_palette[i] != i) {
+                    runtime->draw_palette[i] = (uint8_t)i;
+                    draw_palette_entry_to_ram(runtime, i);
                 }
             }
+            update_palette_default_flags(runtime);
             if (palette == 0)
                 reset_transparency(runtime);
         }
@@ -1719,21 +1937,23 @@ extern "C" __attribute__((noinline)) int p8p_api_pal_full(lua_State *lua) {
             uint8_t *entry = &runtime->ram[P8P_SECONDARY_PALETTE + from];
             int previous = *entry;
             *entry = (uint8_t)arg_int(lua, 2, 0);
+            /* Recompute rather than clear: setting an entry back to its
+             * default keeps the tile blitter's fast path. */
             if (*entry != previous)
-                runtime->palettes_default = 0;
+                update_palette_default_flags(runtime);
             push_int(lua, previous);
             return 1;
         }
-        int to = arg_int(lua, 2, 0) & (screen ? 0x8f : 15);
-        int previous = screen ? runtime->screen_palette[from]
-                              : runtime->draw_palette[from];
-        if (previous != to) {
-            if (screen)
-                runtime->screen_palette[from] = (uint8_t)to;
-            else
-                runtime->draw_palette[from] = (uint8_t)to;
+        int value = arg_int(lua, 2, 0);
+        if (screen) {
+            push_int(lua, set_screen_palette_entry(runtime, from, value));
+            return 1;
+        }
+        int previous = runtime->draw_palette[from];
+        if (previous != (value & 15)) {
+            runtime->draw_palette[from] = (uint8_t)(value & 15);
             runtime->palettes_default = 0;
-            palette_entry_to_ram(runtime, from);
+            draw_palette_entry_to_ram(runtime, from);
         }
         push_int(lua, previous);
         return 1;
@@ -1832,18 +2052,41 @@ static int api_btnp(lua_State *lua) {
     return 1;
 }
 
-static int api_peek(lua_State *lua) {
-    profile_api(P8P_API_MEMORY);
-    int address = arg_int(lua, 1, 0) & 0xffff;
-    int count = arg_int(lua, 2, 1);
-    if (count < 1) count = 1;
+/*
+ * peek(), peek2() and peek4() return one value without a count, and none for
+ * a count below 1, nil included, as in PICO-8.  poke(), poke2() and poke4()
+ * write each value in turn, and a missing value writes 0.
+ */
+static int peek_count(lua_State *lua) {
+    if (arg_count(lua) < 2)
+        return 1;
+    int count = arg_int(lua, 2, 0);
+    if (count < 1)
+        return 0;
     /* PICO-8 v0.2.5+ raised the multi-value peek limit from 8192. */
-    if (count > 32767) count = 32767;
+    if (count > 32767)
+        count = 32767;
     /* C functions are only guaranteed LUA_MINSTACK free slots. */
     if (count > LUA_MINSTACK && !lua_checkstack(lua, count))
         return luaL_error(lua, "peek: stack overflow");
-    if (range_touches_screen(address, count))
+    return count;
+}
+
+static int poke_count(lua_State *lua) {
+    int values = arg_count(lua) - 1;
+    return values < 1 ? 1 : values;
+}
+
+static void flush_screen_for_peek(int address, int count, int size) {
+    if (range_touches_screen(address, ram_length(count * size)))
         screen_to_ram(active_runtime);
+}
+
+static int api_peek(lua_State *lua) {
+    profile_api(P8P_API_MEMORY);
+    int address = arg_int(lua, 1, 0) & 0xffff;
+    int count = peek_count(lua);
+    flush_screen_for_peek(address, count, 1);
     for (int i = 0; i < count; ++i)
         push_int(lua, active_runtime->ram[(address + i) & 0xffff]);
     return count;
@@ -1852,83 +2095,54 @@ static int api_peek(lua_State *lua) {
 static int api_poke(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int address = arg_int(lua, 1, 0) & 0xffff;
-    int values = arg_count(lua) - 1;
-    if (values < 1)
-        values = 1;
+    int values = poke_count(lua);
     for (int i = 0; i < values; ++i)
         active_runtime->ram[(address + i) & 0xffff] =
             (uint8_t)arg_int(lua, i + 2, 0);
-    if (range_touches_screen(address, values))
-        ram_to_screen_range(active_runtime, address, values);
-    if (range_touches_draw_state(address, values))
-        draw_state_from_ram(active_runtime);
-    if (range_touches_cartdata(address, values))
-        cartdata_mark_dirty(active_runtime);
+    ram_written(active_runtime, address, values);
     return 0;
 }
 
 static int api_peek2(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int address = arg_int(lua, 1, 0);
-    if (address < 0 || address > 0xfffe) {
-        push_int(lua, 0);
-        return 1;
-    }
-    if (range_touches_screen(address, 2))
-        screen_to_ram(active_runtime);
-    push_int(lua, active_runtime->ram[address] |
-                  ((int)active_runtime->ram[address + 1] << 8));
-    return 1;
+    int address = arg_int(lua, 1, 0) & 0xffff;
+    int count = peek_count(lua);
+    flush_screen_for_peek(address, count, 2);
+    for (int i = 0; i < count; ++i)
+        push_int(lua, (int)ram_read(active_runtime, address + i * 2, 2));
+    return count;
 }
 
 static int api_poke2(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int address = arg_int(lua, 1, 0);
-    int value = arg_int(lua, 2, 0);
-    if (address < 0 || address > 0xfffe)
-        return 0;
-    active_runtime->ram[address] = (uint8_t)value;
-    active_runtime->ram[address + 1] = (uint8_t)(value >> 8);
-    if (range_touches_screen(address, 2))
-        ram_to_screen_range(active_runtime, address, 2);
-    if (range_touches_draw_state(address, 2))
-        draw_state_from_ram(active_runtime);
-    if (range_touches_cartdata(address, 2)) cartdata_mark_dirty(active_runtime);
+    int address = arg_int(lua, 1, 0) & 0xffff;
+    int values = poke_count(lua);
+    for (int i = 0; i < values; ++i)
+        ram_write(active_runtime, address + i * 2,
+                  (uint32_t)arg_int(lua, i + 2, 0), 2);
+    ram_written(active_runtime, address, ram_length(values * 2));
     return 0;
 }
 
 static int api_peek4(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int address = arg_int(lua, 1, 0);
-    if (address < 0 || address > 0xfffc) {
-        lua_pushnumber(lua, fix32(0));
-        return 1;
-    }
-    if (range_touches_screen(address, 4))
-        screen_to_ram(active_runtime);
-    uint32_t bits = (uint32_t)active_runtime->ram[address] |
-        ((uint32_t)active_runtime->ram[address + 1] << 8) |
-        ((uint32_t)active_runtime->ram[address + 2] << 16) |
-        ((uint32_t)active_runtime->ram[address + 3] << 24);
-    lua_pushnumber(lua, fix32::frombits((int32_t)bits));
-    return 1;
+    int address = arg_int(lua, 1, 0) & 0xffff;
+    int count = peek_count(lua);
+    flush_screen_for_peek(address, count, 4);
+    for (int i = 0; i < count; ++i)
+        lua_pushnumber(lua, fix32::frombits(
+            (int32_t)ram_read(active_runtime, address + i * 4, 4)));
+    return count;
 }
 
 static int api_poke4(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
-    int address = arg_int(lua, 1, 0);
-    if (address < 0 || address > 0xfffc)
-        return 0;
-    uint32_t bits = (uint32_t)arg_number(lua, 2, fix32(0)).bits();
-    active_runtime->ram[address] = (uint8_t)bits;
-    active_runtime->ram[address + 1] = (uint8_t)(bits >> 8);
-    active_runtime->ram[address + 2] = (uint8_t)(bits >> 16);
-    active_runtime->ram[address + 3] = (uint8_t)(bits >> 24);
-    if (range_touches_screen(address, 4))
-        ram_to_screen_range(active_runtime, address, 4);
-    if (range_touches_draw_state(address, 4))
-        draw_state_from_ram(active_runtime);
-    if (range_touches_cartdata(address, 4)) cartdata_mark_dirty(active_runtime);
+    int address = arg_int(lua, 1, 0) & 0xffff;
+    int values = poke_count(lua);
+    for (int i = 0; i < values; ++i)
+        ram_write(active_runtime, address + i * 4,
+                  (uint32_t)arg_number(lua, i + 2, fix32(0)).bits(), 4);
+    ram_written(active_runtime, address, ram_length(values * 4));
     return 0;
 }
 
@@ -1936,16 +2150,9 @@ static int api_memset(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int destination = arg_int(lua, 1, 0);
     int value = arg_int(lua, 2, 0);
-    int length = arg_int(lua, 3, 0);
-    if (destination >= 0 && length >= 0 && destination + length <= 0x10000) {
-        memset(active_runtime->ram + destination, value, (size_t)length);
-        if (range_touches_screen(destination, length))
-            ram_to_screen_range(active_runtime, destination, length);
-        if (range_touches_draw_state(destination, length))
-            draw_state_from_ram(active_runtime);
-        if (range_touches_cartdata(destination, length))
-            cartdata_mark_dirty(active_runtime);
-    }
+    int length = ram_length(arg_int(lua, 3, 0));
+    ram_fill(active_runtime, destination, value, length);
+    ram_written(active_runtime, destination, length);
     return 0;
 }
 
@@ -1953,22 +2160,11 @@ static int api_memcpy(lua_State *lua) {
     profile_api(P8P_API_MEMORY);
     int destination = arg_int(lua, 1, 0);
     int source = arg_int(lua, 2, 0);
-    int length = arg_int(lua, 3, 0);
-    if (destination >= 0 && source >= 0 && length >= 0 &&
-        destination + length <= 0x10000 && source + length <= 0x10000) {
-        int reads_screen = range_touches_screen(source, length);
-        int writes_screen = range_touches_screen(destination, length);
-        if (reads_screen)
-            screen_to_ram(active_runtime);
-        memmove(active_runtime->ram + destination, active_runtime->ram + source,
-                (size_t)length);
-        if (writes_screen)
-            ram_to_screen_range(active_runtime, destination, length);
-        if (range_touches_draw_state(destination, length))
-            draw_state_from_ram(active_runtime);
-        if (range_touches_cartdata(destination, length))
-            cartdata_mark_dirty(active_runtime);
-    }
+    int length = ram_length(arg_int(lua, 3, 0));
+    if (range_touches_screen(source, length))
+        screen_to_ram(active_runtime);
+    ram_move(active_runtime, destination, source, length);
+    ram_written(active_runtime, destination, length);
     return 0;
 }
 
@@ -1977,16 +2173,22 @@ static int api_reload(lua_State *lua) {
     int destination = arg_int(lua, 1, 0);
     int source = arg_int(lua, 2, 0);
     int length = arg_int(lua, 3, 0x4300);
-    if (destination >= 0 && source >= 0 && length >= 0 &&
-        destination + length <= 0x10000 &&
+    if (source >= 0 && length >= 0 &&
         source + length <= (int)P8P_CART_ROM_SIZE) {
-        int writes_screen = range_touches_screen(destination, length);
-        memcpy(active_runtime->ram + destination, active_runtime->cart_rom + source,
-               (size_t)length);
-        if (writes_screen)
-            ram_to_screen_range(active_runtime, destination, length);
-        if (range_touches_draw_state(destination, length))
-            draw_state_from_ram(active_runtime);
+        destination &= 0xffff;
+        while (length > 0) {
+            int chunk = length < RAM_SIZE - destination ? length
+                                                         : RAM_SIZE - destination;
+            memcpy(active_runtime->ram + destination,
+                   active_runtime->cart_rom + source, (size_t)chunk);
+            if (range_touches_screen(destination, chunk))
+                ram_to_screen_range(active_runtime, destination, chunk);
+            if (range_touches_draw_state(destination, chunk))
+                draw_state_from_ram(active_runtime);
+            source += chunk;
+            length -= chunk;
+            destination = 0;
+        }
     }
     return 0;
 }
@@ -2773,10 +2975,19 @@ static int api_print(lua_State *lua) {
 }
 
 static int api_sfx(lua_State *lua) {
-    int channel = p8p_audio_sfx(active_runtime->audio,
-                                arg_int(lua, 1, -1), arg_int(lua, 2, -1),
+    /* A nil index is sfx 0, but sfx() with no arguments does nothing. */
+    if (arg_count(lua) == 0)
+        return 0;
+    int index = arg_int(lua, 1, 0);
+    if (index > 63)
+        index = 63;
+    else if (index < -2)
+        index = 0;
+    int channel = p8p_audio_sfx(active_runtime->audio, index,
+                                /* Only a missing channel means any channel. */
+                                arg_count(lua) < 2 ? -1 : arg_int(lua, 2, 0),
                                 arg_int(lua, 3, 0), arg_int(lua, 4, 0));
-    push_int(lua, channel < 0 ? 0 : channel);
+    push_int(lua, channel);
     return 1;
 }
 
@@ -2833,8 +3044,21 @@ static int api_stat(lua_State *lua) {
         lua_pushstring(lua, runtime->params);
         break;
     case 5:
-        push_int(lua, 42);
+        push_int(lua, 43);  /* PICO-8 0.2.7's version number */
         break;
+    case 9:
+        /* The display's refresh rate. */
+        push_int(lua, 60);
+        break;
+    case 11:
+        /* One display; _map_display() selects nothing else. */
+        push_int(lua, 1);
+        break;
+    /* The pause menu's rectangle, as PICO-8 reports it. */
+    case 12: push_int(lua, 23); break;
+    case 13: push_int(lua, 39); break;
+    case 14: push_int(lua, 104); break;
+    case 15: push_int(lua, 88); break;
     case 7:
     case 8:
         push_int(lua, runtime->target_fps);
@@ -2863,6 +3087,8 @@ static int api_stat(lua_State *lua) {
         break;
     case 28:
     case 30:
+    case 104:
+    case 110: /* frame-by-frame mode */
     case 120:
     case 121:
     case 122:
@@ -2900,8 +3126,19 @@ static int api_stat(lua_State *lua) {
         else
             lua_pushnil(lua);
         break;
+    case 64: case 65: case 66: case 67:
+    case 68: case 69: case 70: case 71:
     case 101:
         lua_pushnil(lua);
+        break;
+    case 109:
+    case 111:
+        /* PICO-8 reports 256 for both. */
+        push_int(lua, 256);
+        break;
+    case 124:
+        /* The current directory. */
+        lua_pushliteral(lua, "/");
         break;
     case 108:
         /* PCM samples still queued from serial(0x808). */
@@ -2914,7 +3151,8 @@ static int api_stat(lua_State *lua) {
         push_int(lua, p8p_audio_channel_note(runtime->audio, item - 50));
         break;
     default:
-        lua_pushnil(lua);
+        /* PICO-8 returns 0 for every other code, including unused ones. */
+        push_int(lua, 0);
         break;
     }
     return 1;
@@ -3105,15 +3343,24 @@ static int api_trace(lua_State *lua) {
 static int api_serial(lua_State *lua) {
     p8p_runtime_t *runtime = active_runtime;
     int channel = arg_int(lua, 1, 0);
-    int address = arg_int(lua, 2, 0);
-    int length = arg_int(lua, 3, 0);
+    int address = arg_int(lua, 2, 0) & 0xffff;
+    int length = ram_length(arg_int(lua, 3, 0));
     int processed = 0;
-    if (channel == 0x808 && address >= 0 && length > 0 &&
-        address + length <= 0x10000) {
+    if (channel == 0x808 && length > 0) {
         if (range_touches_screen(address, length))
             screen_to_ram(runtime);
-        processed = p8p_audio_pcm_push(runtime->audio, runtime->ram + address,
-                                       length);
+        /* The read wraps past 0xffff; stop when the queue fills. */
+        while (processed < length) {
+            int chunk = length - processed;
+            if (chunk > RAM_SIZE - address)
+                chunk = RAM_SIZE - address;
+            int queued = p8p_audio_pcm_push(runtime->audio,
+                                            runtime->ram + address, chunk);
+            processed += queued;
+            if (queued < chunk)
+                break;
+            address = 0;
+        }
     }
     push_int(lua, processed);
     return 1;
@@ -3293,6 +3540,51 @@ static const luaL_Reg runtime_api[] = {
     {"foreach", api_foreach}, {NULL, NULL}
 };
 
+/*
+ * _set_fps(n) sets the frame rate for flip() loops in top-level code.  PICO-8
+ * steps time() by 1/30 s at 30 and by 1/60 s for any other rate, and its main
+ * loop picks the rate from _update60 again once it starts.  A later call in
+ * PICO-8 changes only how often frames are drawn, never the game speed, so
+ * from the main loop on it keeps the rate.  The frame count is rescaled so
+ * time() continues smoothly, as in PICO-8.
+ */
+static int api_set_fps(lua_State *lua) {
+    p8p_runtime_t *runtime = active_runtime;
+    int fps = arg_int(lua, 1, 0) == 30 ? 30 : 60;
+    if (runtime->cart_thread_kind == 0 && fps != runtime->target_fps) {
+        runtime->frame_count = (uint32_t)((uint64_t)runtime->frame_count *
+                                          (uint32_t)fps /
+                                          (uint32_t)runtime->target_fps);
+        runtime->target_fps = fps;
+    }
+    return 0;
+}
+
+/* _map_display(n) selects the display that drawing goes to.  The Pocket
+ * has one, so as in PICO-8 with a single display, only n < 1 succeeds. */
+static int api_map_display(lua_State *lua) {
+    lua_pushboolean(lua, arg_int(lua, 1, 0) < 1);
+    return 1;
+}
+
+/* reset() returns the draw state to its boot values, as PICO-8 does, but
+ * keeps the cursor and print's left margin.  The poke path then updates the
+ * draw fields and the draw target. */
+static int api_reset(lua_State *lua) {
+    (void)lua;
+    profile_api(P8P_API_DRAW_STATE);
+    p8p_runtime_t *runtime = active_runtime;
+    uint8_t *ram = runtime->ram;
+    uint8_t margin = ram[0x5f24], cursor_x = ram[0x5f26],
+            cursor_y = ram[0x5f27];
+    draw_state_defaults_to_ram(runtime);
+    ram[0x5f24] = margin;
+    ram[0x5f26] = cursor_x;
+    ram[0x5f27] = cursor_y;
+    draw_state_from_ram(runtime);
+    return 0;
+}
+
 /* Added after 0.0.33's first save-state format: numbered last by
  * eris.__p8p_init so existing permanent-object IDs do not move. Keep in
  * sync with the list in that function.  menuitem used to share api_stub,
@@ -3302,7 +3594,14 @@ static const luaL_Reg late_runtime_api[] = {
     {"rrect", api_rrect}, {"rrectfill", api_rrectfill},
     /* Not PICO-8 API, but Yarn calls exit() while drawing its score panel
      * once all levels are unlocked; a no-op lets it finish the frame. */
-    {"exit", api_stub},
+    {"exit", api_stub}, {"reset", api_reset},
+    /* PICO-8 0.2.7 defines these undocumented functions.  The frame and
+     * CPU hooks are no-ops here, and __trace matches trace. */
+    {"_set_fps", api_set_fps}, {"_update_buttons", api_stub},
+    {"_get_menu_item_selected", api_stub}, {"_map_display", api_map_display},
+    {"_mark_cpu", api_stub}, {"_startframe", api_stub},
+    {"__trace", api_trace}, {"holdframe", api_stub},
+    {"_update_framerate", api_stub}, {"set_draw_slice", api_stub},
     {NULL, NULL}
 };
 
@@ -3356,7 +3655,7 @@ static const char bootstrap_lua[] =
     "rawset(debug.getregistry(),'__PICO8_SANDBOX',_G)\n"
     "eris.__p8p_perm={} eris.__p8p_unperm={} eris.__p8p_original={}\n"
     "function eris.__p8p_init()\n"
-    " local late={'cstore','trace','menuitem','exit','rrect','rrectfill'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
+    " local late={'cstore','trace','menuitem','exit','rrect','rrectfill','reset','_set_fps','_update_buttons','_get_menu_item_selected','_map_display','_mark_cpu','_startframe','__trace','holdframe','_update_framerate','set_draw_slice'} local skip={} for _,k in ipairs(late) do skip[k]=true end\n"
     " local keys={} for k in pairs(_G) do if not skip[k] then keys[#keys+1]=k end end table.sort(keys)\n"
     " local seen={} local n=0 local function permanent(v) local t=type(v)\n"
     "  if t~='table' and t~='function' and t~='userdata' and t~='thread' then return end\n"
@@ -3750,34 +4049,14 @@ extern "C" int p8p_runtime_load_context(p8p_runtime_t *runtime,
     memset(runtime->ram, 0, sizeof(runtime->ram));
     memcpy(runtime->cart_rom, cart->rom, sizeof(runtime->cart_rom));
     memcpy(runtime->ram, cart->rom, sizeof(runtime->cart_rom));
-    runtime->ram[0x5f54] = 0x00;
-    runtime->ram[0x5f55] = 0x60;
+    draw_state_defaults_to_ram(runtime);
     runtime->draw_target = 0x6000;
-    runtime->ram[0x5f56] = 0x20;
-    runtime->ram[0x5f57] = 128;
-    runtime->ram[0x5f5c] = 15;
-    runtime->ram[0x5f5d] = 4;
-    runtime->ram[0x5f5e] = 0xff;
-    reset_secondary_palette(runtime);
-    for (int i = 0; i < 16; ++i) {
-        runtime->draw_palette[i] = (uint8_t)i;
-        runtime->screen_palette[i] = (uint8_t)i;
-    }
-    memset(runtime->transparent, 0, sizeof(runtime->transparent));
-    runtime->transparent[0] = 1;
-    runtime->palettes_default = 1;
-    runtime->transparency_default = 1;
-    runtime->camera_x = runtime->camera_y = 0;
-    runtime->clip_x0 = runtime->clip_y0 = 0;
-    runtime->clip_x1 = runtime->clip_y1 = 128;
-    runtime->draw_color = 6;
-    runtime->cursor_x = runtime->cursor_y = 0;
-    set_fill_pattern(runtime, 0, 0);
-    draw_state_to_ram(runtime);
+    draw_state_from_ram(runtime);
     ram_to_screen(runtime);
     p8p_audio_reset(runtime->audio, runtime->ram);
     runtime->error[0] = '\0';
     runtime->frame_count = 0;
+    runtime->target_fps = 30;  /* until _set_fps or the main loop */
     runtime->buttons = runtime->previous_buttons = runtime->frame_buttons = 0;
     memset(runtime->held_frames, 0, sizeof(runtime->held_frames));
     runtime->lua = lua_newstate(lua_pool_alloc, NULL);
@@ -3857,8 +4136,8 @@ extern "C" int p8p_runtime_load_context(p8p_runtime_t *runtime,
         return 0;
     }
     if (cart_status == LUA_YIELD) {
+        /* Top-level flip() loops run at 30 fps unless _set_fps changed it. */
         runtime->cart_thread_active = 1;
-        runtime->target_fps = 30;
     } else if (cart_status == LUA_OK) {
         release_cart_thread(runtime);
         if (finish_cart_load(runtime) != 0)
@@ -4273,6 +4552,72 @@ extern "C" const uint8_t *p8p_runtime_framebuffer(p8p_runtime_t *runtime) {
         runtime->display[i * 2 + 1] = packed >> 4;
     }
     return runtime->display;
+}
+
+/* Writes the 0x5f2c screen transformation of SOURCE to DESTINATION and returns
+ * nonzero, or returns zero when MODE leaves the screen unchanged.  The whole
+ * screen is transformed at presentation, as on PICO-8; drawing and screen
+ * memory always use the normal 128x128 layout. */
+static int transform_screen(int mode, const uint8_t *source,
+                            uint8_t *destination) {
+    switch (mode) {
+    case 1: case 2: case 3: {
+        /* Stretch the left half, top half or top-left quarter. */
+        int x_shift = mode & 1, y_shift = mode >> 1;
+        for (int y = 0; y < 128; ++y) {
+            const uint8_t *row = source + (y >> y_shift) * 128;
+            for (int x = 0; x < 128; ++x)
+                *destination++ = row[x >> x_shift];
+        }
+        return 1;
+    }
+    case 5: case 6: case 7: {
+        /* Reflect the left half, top half or top-left quarter. */
+        int mirror_x = mode & 1, mirror_y = mode & 2;
+        for (int y = 0; y < 128; ++y) {
+            const uint8_t *row =
+                source + (mirror_y && y >= 64 ? 127 - y : y) * 128;
+            for (int x = 0; x < 128; ++x)
+                *destination++ = row[mirror_x && x >= 64 ? 127 - x : x];
+        }
+        return 1;
+    }
+    case 129: case 130: case 131: case 134: {
+        /* 134 is a half turn, which is the same as flipping both axes. */
+        int flip_x = mode != 130, flip_y = mode != 129;
+        for (int y = 0; y < 128; ++y) {
+            const uint8_t *row = source + (flip_y ? 127 - y : y) * 128;
+            for (int x = 0; x < 128; ++x)
+                *destination++ = row[flip_x ? 127 - x : x];
+        }
+        return 1;
+    }
+    case 133:
+        /* Clockwise quarter turn. */
+        for (int y = 0; y < 128; ++y)
+            for (int x = 0; x < 128; ++x)
+                *destination++ = source[(127 - x) * 128 + y];
+        return 1;
+    case 135:
+        /* Counterclockwise quarter turn. */
+        for (int y = 0; y < 128; ++y)
+            for (int x = 0; x < 128; ++x)
+                *destination++ = source[x * 128 + 127 - y];
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+extern "C" const uint8_t *p8p_runtime_display_framebuffer(
+    p8p_runtime_t *runtime) {
+    const uint8_t *screen = p8p_runtime_framebuffer(runtime);
+    if (!screen)
+        return NULL;
+    /* Bit 6 of the mode is ignored. */
+    return transform_screen(runtime->ram[0x5f2c] & ~0x40, screen,
+                            runtime->transformed)
+               ? runtime->transformed : screen;
 }
 
 extern "C" const uint8_t *p8p_runtime_screen_palette(p8p_runtime_t *runtime) {
