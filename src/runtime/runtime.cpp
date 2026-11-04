@@ -2626,6 +2626,24 @@ static int api_print(lua_State *lua) {
         /* Glyphs are cut to their own advance, up to the eight stored columns. */
         const uint8_t *rows = one_off ? one_off : (mode & PRINT_CUSTOM_FONT ?
             runtime->ram + 0x5600 : p8p_pico8_font) + character * 8;
+        /* A Pocket button glyph in place of O or X: 9x7 (11 for Start), so
+         * it is drawn from column -1 and one row up, in two byte halves. */
+        const uint16_t *button = NULL;
+        uint8_t button_left[8] = {0}, button_right[8] = {0};
+        if (!one_off && !(mode & PRINT_CUSTOM_FONT))
+            button = character == 0x8e ? runtime->button_glyph_o :
+                     character == 0x97 ? runtime->button_glyph_x : NULL;
+        int button_right_width = 0;
+        if (button)
+            for (int row = 0; row < 7; ++row) {
+                button_left[row] = (uint8_t)(button[row] & 0xff);
+                button_right[row] = (uint8_t)(button[row] >> 8);
+                for (int bit = 7; bit >= button_right_width; --bit)
+                    if (button_right[row] >> bit & 1) {
+                        button_right_width = bit + 1;
+                        break;
+                    }
+            }
         int render_width = advance / PRINT_SCALED_W(1);
         int render_height = char_height;
         if (render_width > 8) render_width = 8;
@@ -2637,6 +2655,30 @@ static int api_print(lua_State *lua) {
                                 glyph_y + offset_y, pal[color & 15], PRINT_BG(),
                                 draw_mode, 8, 8, advance, cell_height,
                                 glyph_padding);
+            else if (button) {
+                static const uint8_t empty[8] = {0};
+                int wf = (draw_mode & (PRINT_WIDE | PRINT_PINBALL)) ? 2 : 1;
+                int hf = (draw_mode & (PRINT_TALL | PRINT_PINBALL)) ? 2 : 1;
+                /* The cell's solid background, then the glyph over it.  When
+                 * inverted, each half fills its own box (the glyph's width
+                 * and 7 rows) and leaves the glyph's pixels as holes. */
+                if (draw_mode & PRINT_SOLID_BG)
+                    draw_glyph_rows(runtime, empty, glyph_x + offset_x,
+                                    glyph_y + offset_y, pal[color & 15],
+                                    PRINT_BG(), draw_mode & ~PRINT_INVERTED,
+                                    render_width, render_height, advance,
+                                    line_height, padding);
+                int button_mode = draw_mode & ~PRINT_SOLID_BG;
+                draw_glyph_rows(runtime, button_left, glyph_x + offset_x - wf,
+                                glyph_y + offset_y - hf, pal[color & 15], 0,
+                                button_mode, 8, 7, 8 * wf, 7 * hf, 0);
+                if (button_right_width)
+                    draw_glyph_rows(runtime, button_right,
+                                    glyph_x + offset_x + 7 * wf,
+                                    glyph_y + offset_y - hf, pal[color & 15],
+                                    0, button_mode, button_right_width, 7,
+                                    button_right_width * wf, 7 * hf, 0);
+            }
             else if (character > 0x0f)
                 draw_glyph_rows(runtime, rows, glyph_x + offset_x,
                                 glyph_y + offset_y, pal[color & 15], PRINT_BG(),
@@ -2647,7 +2689,21 @@ static int api_print(lua_State *lua) {
         if (outline_neighbours) {
             static const int8_t ox[8] = {-1, 0, 1, -1, 1, -1, 0, 1};
             static const int8_t oy[8] = {-1, -1, -1, 0, 0, 1, 1, 1};
-            uint8_t interior[256];
+            uint8_t interior[256], interior_right[256];
+            /* A Pocket button glyph swaps its own pixels, at its offset. */
+            auto swap_interior = [&]() {
+                int sx = x + offset_x, sy = draw_y + offset_y;
+                if (!button) {
+                    swap_glyph_interior(runtime, rows, sx, sy, mode, interior);
+                    return;
+                }
+                int wf = (mode & (PRINT_WIDE | PRINT_PINBALL)) ? 2 : 1;
+                int hf = (mode & (PRINT_TALL | PRINT_PINBALL)) ? 2 : 1;
+                swap_glyph_interior(runtime, button_left, sx - wf, sy - hf,
+                                    mode, interior);
+                swap_glyph_interior(runtime, button_right, sx + 7 * wf,
+                                    sy - hf, mode, interior_right);
+            };
             /* The background goes first so it cannot cover the outline. */
             if (mode & PRINT_SOLID_BG) {
                 draw_glyph_rows(runtime, rows, x + offset_x, draw_y + offset_y, 0,
@@ -2657,14 +2713,12 @@ static int api_print(lua_State *lua) {
                 glyph_mode &= ~PRINT_SOLID_BG;
             }
             if (outline_hollow)
-                swap_glyph_interior(runtime, rows, x + offset_x,
-                                    draw_y + offset_y, mode, interior);
+                swap_interior();
             for (int i = 0; i < 8; ++i)
                 if (outline_neighbours & (1 << i))
                     draw(x + ox[i], draw_y + oy[i], outline_color, glyph_mode);
             if (outline_hollow)
-                swap_glyph_interior(runtime, rows, x + offset_x,
-                                    draw_y + offset_y, mode, interior);
+                swap_interior();
         }
         if (underline)
         {
@@ -4644,6 +4698,15 @@ extern "C" int p8p_runtime_menu_select(p8p_runtime_t *runtime, int slot,
         (lua_gettop(thread) > 0 && lua_toboolean(thread, 1));
     luaL_unref(runtime->lua, LUA_REGISTRYINDEX, reference);
     return keep_open;
+}
+
+extern "C" void p8p_runtime_set_button_glyphs(p8p_runtime_t *runtime,
+                                              const uint16_t *o_rows,
+                                              const uint16_t *x_rows) {
+    if (!runtime)
+        return;
+    runtime->button_glyph_o = o_rows;
+    runtime->button_glyph_x = x_rows;
 }
 
 extern "C" int p8p_runtime_target_fps(const p8p_runtime_t *runtime) {

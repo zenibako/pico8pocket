@@ -58,13 +58,24 @@ started and how you can help improve it.
   synchronizes PICO-8's packed screen RAM for memory APIs. This removes the
   packed read-modify-write from the common sprite/pixel path and maps the
   display palette during the existing 2× presentation pass.
-- Default controls are `B = O`, `A = X`, `Start = PICO-8 pause menu`; `Y` and `X` are
-  alternate `O` and `X` buttons. The in-core menu has a global profile plus a
-  content-hash-keyed override for each cartridge; D-pad, A/B/X/Y, L/R and Start
-  can all be reassigned while Select remains reserved for the system UI.
-- Pressing Select opens the PICO-8-styled system menu and fully pauses the
-  cartridge with a short audio fade. A or X chooses a row and B goes back; on
-  the save-state screen X saves. Holding Select and pressing the physical X
+- Default controls are `B = O`, `A = X`, `Start = cart menu`; `Y` and `X` are
+  alternate `O` and `X` buttons. Remap buttons for every cart on the Pocket's
+  own Button Mapping page, which lists them by their PICO-8 roles and acts
+  before the core. The in-core Controls page gives one cartridge its own
+  mapping (keyed by content hash) on top of that: D-pad, A/B/X/Y, L/R and
+  Start can all be reassigned, while Select stays reserved for the system UI.
+- Both in-core menus follow the Pocket's convention: A (or X) chooses a row
+  and B goes back one level or closes the menu. Every page shows its buttons
+  on the bottom line as Pocket button glyphs.
+- Start opens the cart menu, PICO-8's pause menu, over the game: CONTINUE,
+  the cart's return row and `menuitem()` entries (with their callbacks,
+  left/right input and button filters), and RESET CART, which asks first. The
+  cart's pause button closes it again; a cart can still suppress it through
+  `0x5f30`.
+- Select opens the PICO-8-styled system menu and fully pauses the cartridge
+  with a short audio fade. Its CART MENU row opens the cart menu, so the cart's
+  entries stay reachable when Start is remapped. On the save-state screen X
+  saves. Holding Select and pressing the physical X
   button toggles the opt-in profiler, with the menu open or closed. Its labelled rows show logical FPS (`L`), estimated visible FPS (`V`), update
   time (`U`), draw time (`D`), audio time (`A`), presentation time (`P`), the
   active render divisor (`R`), a Lua activity count (`K`) and the full runtime
@@ -135,8 +146,10 @@ started and how you can help improve it.
   rainbow bring-up square. Select remains available on that screen, allowing
   the cartridge to be restarted or exited without restarting the core.
 
-- Cartridge `menuitem()` entries appear in the Select system menu right after
-  RESUME, with their callbacks, left/right input and button filters.
+- Where a cart prints PICO-8's 🅾️ or ❎ glyph, the core draws the Pocket
+  button it is mapped to instead (B and A by default, following the cart's
+  control profile). Display → CART ICONS switches back to PICO-8's own glyphs. Custom
+  fonts and sprites are never changed.
 
 This is still an alpha, not a full-compatibility release. Offline BBS handoffs
 use the separately installed collection described below. Arbitrary local-path
@@ -212,7 +225,8 @@ checks each requested payload's CRC and cartridge encoding before loading it.
 Core update packages omit the bundle so updates preserve your installed games.
 
 Cart `load("#id", "return label", "parameters")` requests switch outside Lua.
-Select opens a return row when the cart supplied a label; `extcmd("go_back")`
+The cart menu (Start, or Select → CART MENU) shows a return row when the cart
+supplied a label; `extcmd("go_back")`
 also returns. Returning restarts the parent cart. Up to eight parents are kept
 for the current session. Save states retain parameters, but do not recreate
 return history after a fresh launch. Version-1 save states remain readable.

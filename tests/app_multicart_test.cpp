@@ -37,8 +37,8 @@ void p8p_platform_present(const uint8_t *pixels, const uint8_t *) {
     }
     if (presents == 2) { assert(pixels[0] == 7); assert(identity_count == 2); }
     if (presents == 3) { assert(pixels[0] != 7); assert(pauses > 0); }
-    if (presents >= 8) { assert(pixels[0] == 3); assert(identity_count == 3); }
-    if (++presents == 11) longjmp(done, 1);
+    if (presents >= 10) { assert(pixels[0] == 3); assert(identity_count == 3); }
+    if (++presents == 13) longjmp(done, 1);
 }
 void p8p_platform_audio_pump(struct p8p_runtime *) {}
 int p8p_platform_audio_queued_frames(void) { return 2048; }
@@ -48,8 +48,9 @@ unsigned p8p_platform_set_scale(unsigned s) { return s; }
 uint8_t p8p_platform_dim_color(uint8_t c) { return c; }
 void p8p_platform_poll_input(p8p_physical_input_t *input) {
     static const uint16_t route[] = {
+        /* Select, then CART MENU and its return row. */
         0, P8P_PHYS_A, 0, P8P_PHYS_SELECT, 0, P8P_PHYS_DOWN, 0,
-        P8P_PHYS_A, P8P_PHYS_A, P8P_PHYS_A, 0
+        P8P_PHYS_A, P8P_PHYS_DOWN, P8P_PHYS_A, P8P_PHYS_A, P8P_PHYS_A, 0
     };
     static const uint16_t missing_route[] = {
         0, P8P_PHYS_A, 0, P8P_PHYS_SELECT, 0, P8P_PHYS_UP, 0,

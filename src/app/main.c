@@ -1,5 +1,6 @@
 #include "p8p/cart.h"
 #include "p8p/menu.h"
+#include "p8p/pocket_glyphs.h"
 #include "p8p/multicart.h"
 #include "p8p/pico8_font.h"
 #include "p8p/platform.h"
@@ -148,7 +149,8 @@ static void draw_runtime_error_frame(uint8_t *fb, const char *message) {
         line[line_length] = '\0';
         draw_error_text(fb, 4, y, line, 7);
     }
-    draw_error_text(fb, 40, 117, "SELECT MENU", 6);
+    p8p_menu_draw_text(fb, 64 - p8p_menu_text_width(P8P_ICON_SELECT " MENU") / 2,
+                       117, P8P_ICON_SELECT " MENU", 6);
 }
 
 static uint32_t smooth_time(uint32_t average, uint32_t sample) {
@@ -186,6 +188,22 @@ static void runtime_profile_event(void *userdata,
             profile->average_draw_us, now_us - profile->draw_start_us);
         break;
     }
+}
+
+/* Carts' O and X prompts show the Pocket buttons they are mapped to.  Set
+ * before a cart loads too, so prompts printed in _init() use its mapping. */
+static const p8p_control_profile_t *apply_button_glyphs(
+    p8p_runtime_t *runtime, const p8p_settings_t *settings,
+    const p8p_cart_hash_t *cart_hash) {
+    const p8p_control_profile_t *controls =
+        p8p_settings_controls(settings, cart_hash, NULL);
+    p8p_runtime_set_button_glyphs(
+        runtime,
+        settings->pocket_glyphs ?
+            p8p_menu_button_glyph(controls->physical[P8P_ACTION_O]) : NULL,
+        settings->pocket_glyphs ?
+            p8p_menu_button_glyph(controls->physical[P8P_ACTION_X]) : NULL);
+    return controls;
 }
 
 static void set_diagnostics(p8p_runtime_t *runtime, int *visible,
@@ -562,6 +580,8 @@ int main(int argc, char **argv) {
         if (runtime)
             p8p_runtime_set_cartdata_hooks(runtime, runtime_cartdata_load,
                                            runtime_cartdata_save, NULL);
+        if (runtime)
+            apply_button_glyphs(runtime, &settings, &cart_hash);
         if (runtime && p8p_runtime_load(runtime, &loaded_cart) == 0) {
             running = 1;
             /* The OS then refuses another cart's Memory before it is
@@ -677,6 +697,7 @@ int main(int argc, char **argv) {
                     p8p_menu_destroy(menu);
                     menu = p8p_menu_create(&settings, &cart_hash,
                                            p8p_cart_kind_name(cart.kind));
+                    apply_button_glyphs(runtime, &settings, &cart_hash);
                     if (p8p_runtime_load(runtime, &loaded_cart) == 0) {
                         running = 1;
                         runtime_failed = 0;
@@ -739,7 +760,7 @@ int main(int argc, char **argv) {
         }
 
         const p8p_control_profile_t *controls =
-            p8p_settings_controls(&settings, &cart_hash, NULL);
+            apply_button_glyphs(runtime, &settings, &cart_hash);
         input_latch.runtime = runtime;
         input_latch.controls = controls;
         input_latch.suppressed = suppress_buttons;

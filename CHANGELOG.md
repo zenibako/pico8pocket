@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Start and Select menus now behave alike. Both use the Pocket's convention:
+  A or X chooses and B goes back one level, so B no longer selects in the Start
+  menu. Both say CONTINUE and RESET CART, and resetting from Start now asks
+  first. The cart's `menuitem()` rows and return row live in the Start menu,
+  which Select reaches through a new CART MENU row, so they still work when
+  Start is remapped.
+- Button prompts use Analogue Pocket button glyphs (the same set as
+  Butterscotch Pocket) on every menu page's new hint line, the Controls page,
+  the reset and delete confirmations, the cart picker and the error screen.
+- Carts' 🅾️ and ❎ glyphs in `print()` show the Pocket button each is mapped
+  to. Display → CART ICONS turns this off. Settings move to version 2; version
+  1 settings are kept.
+- The Pocket's Button Mapping page names Start "Cart Menu", and A and B
+  "Confirm" and "Back". It is now the place to remap buttons for every cart:
+  the in-core Controls page only sets a cart's own mapping, and a custom
+  global profile from earlier versions is reset to the defaults.
+
 - `_set_fps(60)` in top-level code makes `flip()` loops there run at 60 fps,
   as in PICO-8 0.2.7, and `time()` stays continuous when the rate changes.
   Carts that run their title screen or whole game from top-level code used to

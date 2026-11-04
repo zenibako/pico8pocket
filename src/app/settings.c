@@ -2,9 +2,12 @@
 
 #include "p8p/platform.h"
 
+#include <stddef.h>
 #include <string.h>
 
-#define SETTINGS_VERSION 1u
+#define SETTINGS_VERSION 2u
+/* Version 1 ended before pocket_glyphs. */
+#define SETTINGS_V1_SIZE offsetof(p8p_settings_t, pocket_glyphs)
 
 typedef struct p8p_settings_file {
     uint8_t magic[8];
@@ -46,6 +49,7 @@ void p8p_settings_defaults(p8p_settings_t *settings) {
     memset(settings, 0, sizeof(*settings));
     settings->volume = 100;
     settings->scale = 2;
+    settings->pocket_glyphs = 1;
     p8p_control_profile_defaults(&settings->global_controls);
 }
 
@@ -56,10 +60,19 @@ int p8p_settings_load(p8p_settings_t *settings) {
     p8p_settings_defaults(settings);
     if (p8p_store_read_config(&file, sizeof(file)) != 0)
         return 0;
-    if (memcmp(file.magic, settings_magic, sizeof(file.magic)) != 0 ||
-        file.version != SETTINGS_VERSION || file.size != sizeof(file.settings))
+    if (memcmp(file.magic, settings_magic, sizeof(file.magic)) != 0)
         return 0;
-    memcpy(settings, &file.settings, sizeof(*settings));
+    if (file.version == 1 && file.size == SETTINGS_V1_SIZE) {
+        /* Keep the new fields' defaults. */
+        memcpy(settings, &file.settings, SETTINGS_V1_SIZE);
+    } else if (file.version == SETTINGS_VERSION &&
+               file.size == sizeof(file.settings)) {
+        memcpy(settings, &file.settings, sizeof(*settings));
+    } else {
+        return 0;
+    }
+    settings->pocket_glyphs = settings->pocket_glyphs != 0;
+    p8p_control_profile_defaults(&settings->global_controls);
     settings->language = settings->language != 0;
     settings->muted = settings->muted != 0;
     if (settings->volume > 100) settings->volume = 100;
