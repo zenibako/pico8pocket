@@ -181,7 +181,7 @@ package: validate
 # Test build for the device: core.json reports <next>-rc.<N> so it never
 # matches the published release (see scripts/test-version.py).
 package-test:
-	$(MAKE) package CORE_VERSION=$$(python3 scripts/test-version.py)
+	version="$$(python3 scripts/test-version.py)" && $(MAKE) package CORE_VERSION="$$version"
 
 # Explicit opt-in for private test builds.  Public packages never include
 # locally supplied cartridges.
