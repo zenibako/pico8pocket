@@ -31,17 +31,9 @@ ELF="$PROJECT_ROOT/.obj/pico8pocket/app.elf"
 [[ -f "$ELF" ]] || { echo "Missing $ELF; run make pocket-elf first" >&2; exit 1; }
 [[ -f "$SDK_ROOT/runtime/pocket/os20.rbf_r" ]] || { echo "Missing openfpgaOS runtime; run make deps" >&2; exit 1; }
 
-rm -rf "$OUT"
-mkdir -p "$CORE_DIR" "$ASSET_DIR/cards" "$INSTANCE_DIR" "$PLATFORM_DIR/_images"
-cp "$PROJECT_ROOT"/dist/core/*.json "$CORE_DIR/"
-# Sleep needs save states; an SDK without the save-state API can't resume.
-if [[ ! -f "$SDK_ROOT/src/sdk/include/of_savestate.h" ]]; then
-    jq '.core.framework.sleep_supported = false' "$CORE_JSON" > "$CORE_DIR/core.json"
-    echo "SDK has no save-state API; core.json advertises no sleep support"
-fi
-# Test builds report their own version (scripts/test-version.py) so Pocket
-# tools can tell them apart from the published release.
 if [[ -n "${CORE_VERSION:-}" ]]; then
+    # Test builds (make package-test) report <next>-rc.<N>. Check the value
+    # before anything is deleted or written.
     [[ "$CORE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
         echo "CORE_VERSION must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N" >&2
         exit 1
@@ -50,6 +42,19 @@ if [[ -n "${CORE_VERSION:-}" ]]; then
         echo "CORE_VERSION must be 31 characters or fewer" >&2
         exit 1
     }
+fi
+
+rm -rf "$OUT"
+mkdir -p "$CORE_DIR" "$ASSET_DIR/cards" "$INSTANCE_DIR" "$PLATFORM_DIR/_images"
+cp "$PROJECT_ROOT"/dist/core/*.json "$CORE_DIR/"
+# Sleep needs save states; an SDK without the save-state API can't resume.
+if [[ ! -f "$SDK_ROOT/src/sdk/include/of_savestate.h" ]]; then
+    jq '.core.framework.sleep_supported = false' "$CORE_JSON" > "$CORE_DIR/core.json"
+    echo "SDK has no save-state API; core.json advertises no sleep support"
+fi
+# Stamp the test build's own version (scripts/test-version.py) so Pocket
+# tools can tell it apart from the published release.
+if [[ -n "${CORE_VERSION:-}" ]]; then
     jq --arg version "$CORE_VERSION" '.core.metadata.version = $version' \
         "$CORE_DIR/core.json" > "$CORE_DIR/core.json.tmp"
     mv "$CORE_DIR/core.json.tmp" "$CORE_DIR/core.json"

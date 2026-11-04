@@ -156,6 +156,8 @@ class PackageMetadataTests(unittest.TestCase):
         long = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='1.2.3-rc.' + '9' * 23),
                               capture_output=True)
         self.assertNotEqual(long.returncode, 0)
+        # Rejected before the previous tree is removed.
+        self.assertTrue((self.tree / 'Cores/zenibako.pico8/core.json').is_file())
 
 
 class TestVersionTests(unittest.TestCase):
