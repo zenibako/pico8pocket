@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- `rnd(table)` picks the same element as PICO-8, which takes `flr(rnd(#t))+1`.
+  It used a different draw, so carts that place things with `rnd(table)` after
+  `srand()` (such as `dino_sort`) built different levels. (#80)
+- `reload()` into the cartdata range (0x5e00-0x5eff) now marks cartdata as
+  changed, so it is saved like `poke()` and `memcpy()` writes. (#84)
+- When all 192 per-cart control slots are in use, giving another cart its own
+  mapping shows NO FREE CART SLOT instead of overwriting the first cart's
+  mapping. (#85)
+
 - Start and Select menus now behave alike. Both use the Pocket's convention:
   A or X chooses and B goes back one level, so B no longer selects in the Start
   menu. Both say CONTINUE and RESET CART, and resetting from Start now asks

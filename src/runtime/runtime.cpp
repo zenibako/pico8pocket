@@ -2181,10 +2181,7 @@ static int api_reload(lua_State *lua) {
                                                          : RAM_SIZE - destination;
             memcpy(active_runtime->ram + destination,
                    active_runtime->cart_rom + source, (size_t)chunk);
-            if (range_touches_screen(destination, chunk))
-                ram_to_screen_range(active_runtime, destination, chunk);
-            if (range_touches_draw_state(destination, chunk))
-                draw_state_from_ram(active_runtime);
+            ram_written(active_runtime, destination, chunk);
             source += chunk;
             length -= chunk;
             destination = 0;
@@ -2271,7 +2268,11 @@ static int api_rnd(lua_State *lua) {
         if (length <= 0) {
             lua_pushnil(lua);
         } else {
-            lua_rawgeti(lua, 1, (int)(runtime->rng[1] % (uint32_t)length) + 1);
+            /* PICO-8 picks t[flr(rnd(#t))+1]: the draw is taken modulo
+             * #t in 16.16, not modulo #t. */
+            uint32_t range = (uint32_t)length << 16;
+            int index = range ? (int)((runtime->rng[1] % range) >> 16) : 0;
+            lua_rawgeti(lua, 1, index + 1);
         }
     } else {
         fix32 range = arg_number(lua, 1, fix32(1));

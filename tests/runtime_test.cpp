@@ -784,8 +784,10 @@ static void circles_match_pico8(void) {
             fprintf(stderr, "FAIL circfill radius %d differs from circ\n", radius);
         CHECK(matches);
     }
-    /* The walk stops once every remaining row is clipped.  A clipped circle
-     * must match the unclipped one on the rows left visible. */
+    /* api_circfill stops walking once every remaining row is clipped.  These
+     * checks cover only the pixels: a clipped circle must match the
+     * unclipped one on the rows left visible.  They don't check the early
+     * stop itself. */
     {
         uint8_t full[128 * 128];
         memcpy(full, draw_shape(runtime, "circfill(64,30,50,7)"), sizeof(full));
@@ -1287,6 +1289,91 @@ static void reset_restores_boot_draw_state(void) {
             fprintf(stderr, "FAIL reset case %d\n", index + 1);
         CHECK(fb[index] == 11);
     }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void rnd_table_matches_flr_rnd(void) {
+    /* PICO-8's rnd(t) is t[flr(rnd(#t))+1] and advances the generator once,
+     * so both sequences must agree after the same srand(). */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _draw()\n"
+        " local t={1,2,3,4,5,6,7} local a,b={},{}\n"
+        " srand(0) for i=1,200 do a[i]=rnd(t) end\n"
+        " srand(0) for i=1,200 do b[i]=flr(rnd(#t))+1 end\n"
+        " local ok=true for i=1,200 do if a[i]~=b[i] then ok=false end end\n"
+        " srand(0) rnd(t) local after=rnd() srand(0) rnd(1) ok=ok and after==rnd()\n"
+        " cls() pset(0,0,ok and 11 or 8)\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    CHECK(p8p_runtime_framebuffer(runtime)[0] == 11);
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static void full_cart_control_table_keeps_slot_zero(void) {
+    p8p_settings_t settings;
+    p8p_cart_hash_t hash = {};
+    p8p_settings_defaults(&settings);
+    for (int i = 0; i < P8P_CART_PROFILE_COUNT; ++i) {
+        hash.bytes[0] = (uint8_t)i;
+        hash.bytes[1] = (uint8_t)(i >> 8);
+        hash.bytes[2] = 1;
+        p8p_control_profile_t *profile =
+            p8p_settings_cart_controls(&settings, &hash, 1);
+        CHECK(profile != NULL);
+        if (profile)
+            profile->physical[0] = (uint16_t)(i + 1);
+    }
+    hash = {};
+    hash.bytes[2] = 2;
+    CHECK(p8p_settings_cart_controls(&settings, &hash, 1) == NULL);
+    CHECK(settings.carts[0].used);
+    CHECK(settings.carts[0].hash.bytes[2] == 1 &&
+          settings.carts[0].hash.bytes[0] == 0);
+    CHECK(settings.carts[0].controls.physical[0] == 1);
+}
+
+static uint8_t reload_saved[256];
+static int reload_save_calls;
+
+static int reload_cartdata_save(void *, const char *, const uint8_t *data,
+                                size_t size) {
+    ++reload_save_calls;
+    memcpy(reload_saved, data, size < sizeof(reload_saved) ? size
+                                                          : sizeof(reload_saved));
+    return 0;
+}
+
+static void reload_marks_cartdata_dirty(void) {
+    /* reload() over 0x5e00 changes what dget() returns, so the cartdata
+     * save has to pick it up, as it does for poke() and memcpy(). */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function _init() cartdata('reload-test') reload(0x5e00,0,4) end\n"
+        "function _draw() end\n"
+        "__gfx__\n"
+        "77777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    memset(reload_saved, 0, sizeof(reload_saved));
+    reload_save_calls = 0;
+    p8p_runtime_set_cartdata_hooks(runtime, NULL, reload_cartdata_save, NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    p8p_runtime_flush_cartdata(runtime);
+    CHECK(reload_save_calls == 1);
+    CHECK(reload_saved[0] == 0x77 && reload_saved[3] == 0x77);
+    CHECK(reload_saved[4] == 0);
     p8p_runtime_destroy(runtime);
     p8p_cart_destroy(&cart);
 }
@@ -1970,6 +2057,9 @@ int main(void) {
     hidden_builtins_match_pico8();
     stat_values_match_pico8();
     reset_restores_boot_draw_state();
+    reload_marks_cartdata_dirty();
+    rnd_table_matches_flr_rnd();
+    full_cart_control_table_keeps_slot_zero();
     line_pen_matches_pico8();
     map_default_size_matches_pico8();
     multi_value_peek_poke_matches_pico8();
