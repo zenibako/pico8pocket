@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.1.0 — 2026-11-04
+
 - `rnd(table)` picks the same element as PICO-8 0.2.7, and `rnd({})` no
   longer advances the random state. The pick was different, so carts that
   place things with `rnd(table)` after `srand()` (such as `dino_sort`) built
@@ -11,6 +13,13 @@
 - When all 192 per-cart control slots are in use, giving another cart its own
   mapping shows NO FREE CART SLOT instead of overwriting the first cart's
   mapping. (#85)
+- The core ships the `pocket-runtime-902a8ad` openfpgaOS runtime, which
+  writes cartdata and save states through to the SD card as soon as they are
+  saved and reports save errors. The previous runtime only wrote them back when
+  the core closed from the Pocket menu.
+- Reverb and dampen echoes ring out after a sound ends. They used to cut off
+  about 3 ms after the sound and resume, stale, the next time the channel
+  played.
 
 - Start and Select menus now behave alike. Both use the Pocket's convention:
   A or X chooses and B goes back one level, so B no longer selects in the Start
