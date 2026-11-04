@@ -99,9 +99,11 @@ PICO-8 buttons are mapped by position and common emulator convention:
 Input edges reported by openfpgaOS are retained separately from held state so
 short presses are not lost when a cartridge frame exceeds its budget.
 
-The application keeps a global mapping and an optional mapping keyed by each
-cartridge content hash. Select is deliberately excluded from remapping so the
-system menu and diagnostics chord are always recoverable.
+Remapping for every cartridge is the Pocket's own Button Mapping page, which
+acts before the core sees the buttons. The application keeps the default
+mapping and an optional mapping keyed by each cartridge content hash, set on
+the in-core Controls page. Select is deliberately excluded from remapping so
+the system menu and diagnostics chord are always recoverable.
 
 ## System menu and state storage
 
