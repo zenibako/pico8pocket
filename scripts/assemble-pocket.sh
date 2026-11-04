@@ -39,6 +39,18 @@ if [[ ! -f "$SDK_ROOT/src/sdk/include/of_savestate.h" ]]; then
     jq '.core.framework.sleep_supported = false' "$CORE_JSON" > "$CORE_DIR/core.json"
     echo "SDK has no save-state API; core.json advertises no sleep support"
 fi
+# Test builds report their own version (scripts/test-version.py) so Pocket
+# tools can tell them apart from the published release.
+if [[ -n "${CORE_VERSION:-}" ]]; then
+    [[ "$CORE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
+        echo "CORE_VERSION must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-rc.N" >&2
+        exit 1
+    }
+    jq --arg version "$CORE_VERSION" '.core.metadata.version = $version' \
+        "$CORE_DIR/core.json" > "$CORE_DIR/core.json.tmp"
+    mv "$CORE_DIR/core.json.tmp" "$CORE_DIR/core.json"
+    echo "Test build version: $CORE_VERSION"
+fi
 cp "$PROJECT_ROOT/dist/platforms/$PLATFORM_ID.json" "$PLATFORM_DIR/"
 # Platform banner, generated from assets/branding by scripts/platform-image.py.
 cp "$PROJECT_ROOT/dist/platforms/_images/$PLATFORM_ID.bin" "$PLATFORM_DIR/_images/"

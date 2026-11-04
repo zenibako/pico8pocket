@@ -178,6 +178,11 @@ validate: pocket
 package: validate
 	@./scripts/package-pocket.sh
 
+# Test build for the device: core.json reports <next>-rc.<N> so it never
+# matches the published release (see scripts/test-version.py).
+package-test:
+	$(MAKE) package CORE_VERSION=$$(python3 scripts/test-version.py)
+
 # Explicit opt-in for private test builds.  Public packages never include
 # locally supplied cartridges.
 package-local:
@@ -187,7 +192,7 @@ clean:
 	$(MAKE) -C $(APP_DIR) clean PROJECT_ROOT=$(PROJECT_ROOT) SDK_ROOT=$(SDK_ROOT) 2>/dev/null || true
 	rm -rf $(BUILD_DIR) $(PROJECT_ROOT)/.obj
 
-.PHONY: deps test compatibility-check compat-scan celeste celeste-baseline pocket-elf pocket validate package package-local clean
+.PHONY: deps test compatibility-check compat-scan celeste celeste-baseline pocket-elf pocket validate package package-test package-local clean
 
 # Host-side offline collection tools; no private cartridge dependency.
 offline-plugin-test:

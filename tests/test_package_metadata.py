@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -132,6 +133,74 @@ class PackageMetadataTests(unittest.TestCase):
             self.assertEqual(names[10+index], f'pico8pocket_{index}.sav')
         subprocess.run(['bash', str(ROOT / 'scripts/validate-pocket.sh'), str(self.tree)],
                        env=dict(os.environ, BUNDLE_LOCAL_CARTS='0'), check=True, capture_output=True)
+
+    def test_test_build_version_replaces_only_the_packaged_version(self):
+        """A test build reports its -rc.N version; the committed core.json keeps the release."""
+        root = Path(self.temporary.name)
+        script = root / 'scripts/assemble-pocket.sh'
+        env = dict(os.environ, SDK_ROOT=str(root / '.deps/openfpgaos-sdk'), BUNDLE_LOCAL_CARTS='0')
+        released = json.loads((self.tree / 'Cores/zenibako.pico8/core.json').read_text())
+        self.assertEqual(released['core']['metadata']['version'],
+                         json.loads((ROOT / 'dist/core/core.json').read_text())['core']['metadata']['version'])
+        subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='9.8.7-rc.6'),
+                       check=True, capture_output=True)
+        tested = json.loads((self.tree / 'Cores/zenibako.pico8/core.json').read_text())
+        self.assertEqual(tested['core']['metadata']['version'], '9.8.7-rc.6')
+        released['core']['metadata']['version'] = '9.8.7-rc.6'
+        self.assertEqual(tested, released)
+        bad = subprocess.run(['bash', str(script)], env=dict(env, CORE_VERSION='9.8.7 test'),
+                             capture_output=True)
+        self.assertNotEqual(bad.returncode, 0)
+
+
+class TestVersionTests(unittest.TestCase):
+    """scripts/test-version.py numbers test builds of the next release."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        (self.root / 'scripts').mkdir()
+        shutil.copyfile(ROOT / 'scripts/test-version.py', self.root / 'scripts/test-version.py')
+        self.git('init', '-q')
+        self.set_committed('0.1.0')
+        self.commit('release')
+        self.git('tag', 'v0.1.0')
+
+    def git(self, *args):
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=t', '-c', 'user.email=t@t',
+                        *args], check=True, capture_output=True)
+
+    def set_committed(self, version):
+        path = self.root / 'dist/core/core.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({'core': {'metadata': {'version': version}}}))
+
+    def commit(self, message):
+        self.git('add', '-A')
+        self.git('commit', '-q', '--allow-empty', '-m', message)
+
+    def version(self, **env):
+        return subprocess.run([sys.executable, '-I', str(self.root / 'scripts/test-version.py')],
+                              env=dict(os.environ, **env), check=True, capture_output=True,
+                              text=True).stdout.strip()
+
+    def test_counts_commits_since_the_last_release(self):
+        self.assertEqual(self.version(), '0.1.1-rc.0')
+        self.commit('one')
+        self.commit('two')
+        self.assertEqual(self.version(), '0.1.1-rc.2')
+
+    def test_uses_a_bumped_core_version_or_an_explicit_next_version(self):
+        self.set_committed('0.2.0')
+        self.commit('prepare 0.2.0')
+        self.assertEqual(self.version(), '0.2.0-rc.1')
+        self.assertEqual(self.version(NEXT_VERSION='1.0.0'), '1.0.0-rc.1')
+
+    def test_ignores_prerelease_tags(self):
+        self.commit('one')
+        self.git('tag', 'v0.1.1-rc.1')
+        self.assertEqual(self.version(), '0.1.1-rc.1')
 
 
 if __name__ == '__main__':

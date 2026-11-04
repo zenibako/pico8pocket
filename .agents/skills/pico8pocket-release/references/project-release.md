@@ -55,13 +55,23 @@ delete tags or repeatedly rerun the workflow.
 
 ## Building a test zip
 
-- Run `make test`, then `make package USE_SDK_CONTAINER=0`. The second writes
-  `releases/pico8pocket-v<VERSION>.zip` and must print "APF package
+- Run `make test`, then `make package-test USE_SDK_CONTAINER=0`. The second
+  writes `releases/pico8pocket-v<NEXT>-rc.<N>.zip` and must print "APF package
   validation passed: zenibako.pico8 on pico8".
+- Test builds always use `package-test`, never plain `package`. Its core.json
+  version is `<next>-rc.<N>` from `scripts/test-version.py`: N counts the
+  commits since the last `vX.Y.Z` tag, so builds of the next release are
+  numbered, sort above the last release, and never equal it. The next version
+  is the committed core.json version when release prep already bumped it,
+  else the last release with the patch bumped; set `NEXT_VERSION=X.Y.Z` for a
+  minor or major release. Run `git fetch --tags` if no tag is found. Pocket
+  Sync still offers the published release as an update to a test build; that
+  prompt is expected.
 - Run `rm -rf .obj/pico8pocket` first if `include/p8p/vm_fasttext.h` changed.
-- Copy the zip to the repo root under a descriptive name, for example
-  `pico8-zenibako-v0.0.33-<topic>.zip` (`*.zip` is gitignored), and send it
-  with SendUserFile. The user tests every change on a real Pocket.
+- Copy the zip to the repo root under a descriptive name with the test
+  version and short commit, for example
+  `pico8-zenibako-v0.1.1-rc.3-<sha>-<topic>.zip` (`*.zip` is gitignored), and
+  send it with SendUserFile. The user tests every change on a real Pocket.
 - The SDK comes from the pinned Diablo source, with API headers and the
   matched os20 runtime from the fork's pinned runtime release. Read current
   pins from `scripts/fetch-deps.sh`; do not infer a compatible runtime from
@@ -129,9 +139,9 @@ scripts/variant-core.sh releases/pico8pocket-v<VER>.zip b "Test build B" b.zip
 
 ## Checking what is on a card
 
-`core.json` carries the same version for every build of a release, so it
-can't tell builds apart. Compare each core's elf with the same-named elf
-in its candidate zip (`unzip -p ZIP Assets/pico8/common/NAME.elf | cmp -
+A test build's core.json version shows which commit count it came from, but
+builds from the same commit (A/B pairs, uncommitted changes) share it.
+Compare each core's elf with the same-named elf in its candidate zip (`unzip -p ZIP Assets/pico8/common/NAME.elf | cmp -
 "$CARD"/Assets/pico8/common/NAME.elf`): `pico8pocket.elf` for the
 main core and `pico8pocketb.elf` for B, which `scripts/variant-core.sh`
 renames. `Cores/zenibako.pico8b` only shows that some B core is installed.
