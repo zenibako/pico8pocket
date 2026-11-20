@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The core ships the `pocket-runtime-19d9d50` openfpgaOS runtime. Its os20
+  CPU runs at 100 MHz instead of 90 MHz, with faster division, single-cycle
+  shifts and SDRAM open-row tracking, so carts run faster.
+
 ## 0.1.0 — 2026-11-04
 
 - `rnd(table)` picks the same element as PICO-8 0.2.7, and `rnd({})` no

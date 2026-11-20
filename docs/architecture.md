@@ -5,7 +5,7 @@
 Pico8Pocket is an openFPGA core wrapping an openfpgaOS application. The current
 ThinkElastic stack provides:
 
-- VexiiRiscv `rv32imafc`, dual issue at 90 MHz, with 32 KiB instruction and
+- VexiiRiscv `rv32imafc`, dual issue at 100 MHz, with 32 KiB instruction and
   64 KiB data caches;
 - 64 MB SDRAM;
 - indexed and direct-color framebuffers;
@@ -19,7 +19,7 @@ more from its dual-issue CPU than from the 2.5D/3D accelerators in the other
 variants. The build pins the SDK published with Diablo 1.1.0 at commit
 `8cb3198d50618696e07f5b49ad086a369dc57706` (API 0.9.0), with its API headers
 and the matched Pocket runtime taken from the openfpgaOS fork
-zenibako/openfpgaCore at `902a8ad` (release `pocket-runtime-902a8ad`), which
+zenibako/openfpgaCore at `19d9d50` (release `pocket-runtime-19d9d50`), which
 adds native save states and sleep/wake.
 Version 0.0.32 used the earlier `2687e3d0` snapshot (runtime source `453a283`,
 API 0.8.1).

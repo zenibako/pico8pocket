@@ -8,7 +8,7 @@ argument-hint: "[harness: path or host:path of a zenibako/pocket-dev-tools check
 
 ## The hardware, and what that implies
 
-- The pinned `os20` platform is dual-issue VexiiRiscv rv32imafc at 90 MHz:
+- The pinned `os20` platform is dual-issue VexiiRiscv rv32imafc at 100 MHz:
   32 KiB instruction cache, 64 KiB data cache, single-precision FPU only.
   Read `docs/architecture.md` and `scripts/fetch-deps.sh` for the current
   hardware configuration and runtime pins. `double` arithmetic is software-emulated

@@ -2,7 +2,7 @@
 
 Start with the existing [architecture](architecture.md#hardware-and-runtime),
 [PICO-8 compatibility target](compatibility.md) and [release process](RELEASING.md).
-They define the shipping os20/90 MHz configuration, behavior and acceptance gates.
+They define the shipping os20/100 MHz configuration, behavior and acceptance gates.
 Use the local [pocket-benchmarking skill](../.agents/skills/pocket-benchmarking/SKILL.md)
 to locate the maintained `pocket-dev-tools` checkout (formerly `pocket-harness`).
 Its `benchmarks/README.md`
