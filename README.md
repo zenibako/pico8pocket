@@ -106,7 +106,7 @@ started and how you can help improve it.
   newline correctly. This fixes minified cartridges such as Moss Moss where a
   nested one-line `if` previously swallowed the following movement code into
   the wrong branch.
-- The interpreter is tuned for os20's dual-issue 90 MHz RV32 CPU (no
+- The interpreter is tuned for os20's dual-issue 100 MHz RV32 CPU (no
   double-precision FPU, 32 KiB instruction and 64 KiB data caches, 14 KiB of
   zero-wait BRAM that holds the dispatch loop). z8lua is patched (`patches/`) to keep the program
   counter in a register, check its service hook only at jumps and calls,
@@ -275,10 +275,10 @@ make pocket
 `make deps` stages the SDK the build uses in `.deps/openfpgaos-sdk/`:
 Diablo's SDK sources, libraries and container tooling, the API headers from
 `main` of the openfpgaOS fork
-[zenibako/openfpgaCore](https://github.com/zenibako/openfpgaCore) (`902a8ad`),
+[zenibako/openfpgaCore](https://github.com/zenibako/openfpgaCore) (`19d9d50`),
 and that fork's device-tested Pocket runtime (`os20.rbf_r`, `os.bin`,
 `loader.bin`) from its
-[`pocket-runtime-902a8ad`](https://github.com/zenibako/openfpgaCore/releases/tag/pocket-runtime-902a8ad)
+[`pocket-runtime-19d9d50`](https://github.com/zenibako/openfpgaCore/releases/tag/pocket-runtime-19d9d50)
 release, each checked against a SHA-256 pin. The fork's runtime adds native
 save states and sleep/wake: `core.json` sets `sleep_supported`, which turns
 on both the Pocket's Memories and sleep. Built against an SDK without the
@@ -370,8 +370,8 @@ planned in-core browser will consume an index stored beside the cards; see
   (API 0.9.0, as shipped with Diablo 1.1.0): SDK sources, libraries and
   container tooling
 - openfpgaOS fork zenibako/openfpgaCore commit
-  `902a8adc11309c50c8954af2864ddf893c8b1b0c`: API headers, and the Pocket
-  runtime from its `pocket-runtime-902a8ad` release
+  `19d9d50ceec15771b16386456c4a3a22c355f0a5`: API headers, and the Pocket
+  runtime from its `pocket-runtime-19d9d50` release
 - openfpgaOS SDK commit `628a12b551ac8137373c477e97466b84d153d2af`
   (license and redistribution notices)
 - Fake-08 commit `814991a2571ad3970e386cef48f3b148aa1c27b9`, with z8lua at
