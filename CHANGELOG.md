@@ -2,9 +2,13 @@
 
 ## Unreleased
 
+## 0.1.1 — 2026-11-21
+
 - The core ships the `pocket-runtime-19d9d50` openfpgaOS runtime. Its os20
   CPU runs at 100 MHz instead of 90 MHz, with faster division, single-cycle
-  shifts and SDRAM open-row tracking, so carts run faster.
+  shifts and SDRAM open-row tracking, so carts run faster. Memories and
+  sleep/wake work with it. Its final audio mix is louder (+12 dB) than
+  v0.1.0's.
 
 ## 0.1.0 — 2026-11-04
 
