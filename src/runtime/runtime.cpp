@@ -167,12 +167,29 @@ static void set_pen_color(p8p_runtime_t *runtime, int32_t color) {
     runtime->ram[0x5f25] = (uint8_t)runtime->draw_color;
 }
 
+static void set_fill_pattern(p8p_runtime_t *runtime, uint16_t pattern,
+                             uint8_t flags);
+
+/* With bit 0 of 0x5f34 set, a colour argument with 0x1000.0000 set also
+ * sets the fill pattern, as in PICO-8 0.2.7: the fraction is the pattern
+ * and 0x100, 0x200 and 0x400 are fillp()'s transparency, sprite and
+ * secondary-palette bits.  The pattern stays set after the call. */
+static void color_arg_pattern(p8p_runtime_t *runtime, const TValue *value) {
+    if (!value || !ttisnumber(value))
+        return;
+    int32_t bits = nvalue(value).bits();
+    if (bits & 0x10000000)
+        set_fill_pattern(runtime, (uint16_t)bits, (uint8_t)(bits >> 24));
+}
+
 /* A colour argument to a drawing call also becomes the pen colour, as in
  * PICO-8: rectfill(0, 0, 9, 9, 8) pset(20, 20) draws both in red. */
 static int32_t arg_pen(lua_State *lua, int index, p8p_runtime_t *runtime) {
     const TValue *value = arg_value(lua, index);
     if (!value || ttisnil(value))
         return runtime->draw_color;
+    if (runtime->ram[0x5f34] & 1)
+        color_arg_pattern(runtime, value);
     int32_t color = ttisnumber(value) ? (int32_t)nvalue(value) :
                                         (int32_t)lua_tonumber(lua, index);
     set_pen_color(runtime, color);
@@ -1059,6 +1076,8 @@ static int api_sset(lua_State *lua) {
 static int api_color(lua_State *lua) {
     profile_api(P8P_API_DRAW_STATE);
     int previous = active_runtime->draw_color;
+    if (arg_count(lua) >= 1 && (active_runtime->ram[0x5f34] & 1))
+        color_arg_pattern(active_runtime, arg_value(lua, 1));
     set_pen_color(active_runtime,
                   arg_count(lua) >= 1 ? arg_int(lua, 1, 6) : previous);
     push_int(lua, previous);
@@ -1088,6 +1107,8 @@ static int api_line(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     p8p_runtime_t *runtime = active_runtime;
     int count = arg_count(lua);
+    if ((count == 1 || count == 3) && (runtime->ram[0x5f34] & 1))
+        color_arg_pattern(runtime, arg_value(lua, count));
     if (count < 2) {
         if (count == 1)
             set_pen_color(runtime, arg_int(lua, 1, 0));
@@ -1117,14 +1138,58 @@ static int api_line(lua_State *lua) {
     return 0;
 }
 
-static int api_rectfill(lua_State *lua) {
-    profile_api(P8P_API_GRAPHICS);
-    p8p_runtime_t *runtime = active_runtime;
-    int x0 = arg_int(lua, 1, 0);
-    int y0 = arg_int(lua, 2, 0);
-    int x1 = arg_int(lua, 3, x0);
-    int y1 = arg_int(lua, 4, y0);
-    int color = arg_pen(lua, 5, runtime);
+/*
+ * Inverted fills (0x5f34 bit 1).  A filled shape whose colour argument has
+ * 0x1800.0000 set paints every pixel of the clip rectangle outside the
+ * shape instead of inside it, as in PICO-8 0.2.7, with the usual colour,
+ * palette and fill pattern.  The shape is drawn as a mask over a saved copy
+ * of the screen, so the ordinary fill code needs no inverted variant and
+ * pays only one check when the bit is clear.
+ */
+typedef void (*shape_fill_fn)(p8p_runtime_t *runtime, const int *args,
+                              int color);
+
+static inline int inverted_fill(const p8p_runtime_t *runtime, int color) {
+    return (color & 0x1800) == 0x1800 && (runtime->ram[0x5f34] & 2);
+}
+
+static void __attribute__((noinline)) draw_inverted(
+        p8p_runtime_t *runtime, shape_fill_fn fill, const int *args,
+        int color) {
+    static uint8_t saved[sizeof(runtime->framebuffer)];
+    int x0 = runtime->clip_x0 < 0 ? 0 : runtime->clip_x0;
+    int x1 = runtime->clip_x1 > 128 ? 128 : runtime->clip_x1;
+    int y0 = runtime->clip_y0 < 0 ? 0 : runtime->clip_y0;
+    int y1 = runtime->clip_y1 > 128 ? 128 : runtime->clip_y1;
+    if (x0 >= x1 || y0 >= y1)
+        return;
+    memcpy(saved, runtime->framebuffer, sizeof(saved));
+    uint8_t mapped = runtime->draw_palette[color & 15] & 15;
+    uint8_t palette_entry = runtime->draw_palette[color & 15];
+    uint8_t pattern_active = runtime->fill_pattern_active;
+    for (int y = y0; y < y1; ++y)
+        memset(runtime->framebuffer + y * 128 + x0, 0, (size_t)(x1 - x0));
+    runtime->draw_palette[color & 15] = 1;
+    runtime->fill_pattern_active = 0;
+    fill(runtime, args, color);
+    runtime->draw_palette[color & 15] = palette_entry;
+    runtime->fill_pattern_active = pattern_active;
+    for (int y = y0; y < y1; ++y) {
+        pattern_row pattern = {mapped * 0x01010101u, 0};
+        if (pattern_active)
+            pattern = fill_pattern_row(runtime, y, color);
+        uint8_t *row = runtime->framebuffer + y * 128;
+        for (int x = x0; x < x1; ++x) {
+            int shift = 8 * (x & 3);
+            row[x] = row[x] || ((pattern.keep >> shift) & 0xffu) ?
+                saved[y * 128 + x] : (uint8_t)(pattern.fill >> shift);
+        }
+    }
+    runtime->screen_ram_dirty = 1;
+}
+
+static void fill_rect(p8p_runtime_t *runtime, int x0, int y0, int x1, int y1,
+                      int color) {
     if (y0 > y1) { int temp = y0; y0 = y1; y1 = temp; }
 
     /* Clamp in world coordinates before walking the rows.  Real cartridges
@@ -1136,7 +1201,7 @@ static int api_rectfill(lua_State *lua) {
     if (y0 < visible_y0) y0 = visible_y0;
     if (y1 > visible_y1) y1 = visible_y1;
     if (y0 > y1)
-        return 0;
+        return;
     if (runtime->fill_pattern_active) {
         /* Same clipping as draw_hspan(), done once for every row. */
         int screen_x0 = x0 - runtime->camera_x;
@@ -1149,11 +1214,11 @@ static int api_rectfill(lua_State *lua) {
         if (screen_x0 < runtime->clip_x0) screen_x0 = runtime->clip_x0;
         if (screen_x1 >= runtime->clip_x1) screen_x1 = runtime->clip_x1 - 1;
         if (screen_x0 > screen_x1)
-            return 0;
+            return;
         draw_rect_pattern(runtime, screen_x0, screen_x1,
                           y0 - runtime->camera_y, y1 - runtime->camera_y,
                           color);
-        return 0;
+        return;
     }
     /* Solid fill: the same clipping once for the whole rectangle. */
     int screen_x0 = x0 - runtime->camera_x;
@@ -1166,13 +1231,33 @@ static int api_rectfill(lua_State *lua) {
     if (screen_x0 < runtime->clip_x0) screen_x0 = runtime->clip_x0;
     if (screen_x1 >= runtime->clip_x1) screen_x1 = runtime->clip_x1 - 1;
     if (screen_x0 > screen_x1)
-        return 0;
+        return;
     uint8_t mapped = runtime->draw_palette[color & 15] & 15;
     uint8_t *row = runtime->framebuffer +
                    (y0 - runtime->camera_y) * 128;
     for (int y = y0; y <= y1; ++y, row += 128)
         fill_solid_span(row, screen_x0, screen_x1, mapped);
     runtime->screen_ram_dirty = 1;
+}
+
+static void rectfill_shape(p8p_runtime_t *runtime, const int *args,
+                           int color) {
+    fill_rect(runtime, args[0], args[1], args[2], args[3], color);
+}
+
+static int api_rectfill(lua_State *lua) {
+    profile_api(P8P_API_GRAPHICS);
+    p8p_runtime_t *runtime = active_runtime;
+    int args[4];
+    args[0] = arg_int(lua, 1, 0);
+    args[1] = arg_int(lua, 2, 0);
+    args[2] = arg_int(lua, 3, args[0]);
+    args[3] = arg_int(lua, 4, args[1]);
+    int color = arg_pen(lua, 5, runtime);
+    if (inverted_fill(runtime, color))
+        draw_inverted(runtime, rectfill_shape, args, color);
+    else
+        fill_rect(runtime, args[0], args[1], args[2], args[3], color);
     return 0;
 }
 
@@ -1249,12 +1334,23 @@ static int api_rrect(lua_State *lua) {
     return 0;
 }
 
+static void rrectfill_shape(p8p_runtime_t *runtime, const int *args,
+                            int color) {
+    draw_rounded_rect(runtime, args[0], args[1], args[2], args[3], args[4],
+                      color, 1);
+}
+
 static int api_rrectfill(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
     p8p_runtime_t *runtime = active_runtime;
-    draw_rounded_rect(runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
-                      arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-                      arg_int(lua, 5, 0), arg_pen(lua, 6, runtime), 1);
+    int args[5];
+    for (int i = 0; i < 5; ++i)
+        args[i] = arg_int(lua, i + 1, 0);
+    int color = arg_pen(lua, 6, runtime);
+    if (inverted_fill(runtime, color))
+        draw_inverted(runtime, rrectfill_shape, args, color);
+    else
+        rrectfill_shape(runtime, args, color);
     return 0;
 }
 
@@ -1290,15 +1386,10 @@ static void fill_circle_rows(const circle_fill *circle, int offset_y,
     }
 }
 
-static int api_circfill(lua_State *lua) {
-    profile_api(P8P_API_GRAPHICS);
-    p8p_runtime_t *runtime = active_runtime;
-    int cx = arg_int(lua, 1, 0);
-    int cy = arg_int(lua, 2, 0);
-    int radius = arg_int(lua, 3, 4);
-    int color = arg_pen(lua, 4, runtime);
+static void fill_circle(p8p_runtime_t *runtime, int cx, int cy, int radius,
+                        int color) {
     if (radius < 0)
-        return 0;
+        return;
     /* Work in screen coordinates and clip once: circles are often mostly
      * off screen or behind clip(), and a draw_hspan call per row (about
      * 110 circles a frame in Celeste 2) cost more than the filling. */
@@ -1315,7 +1406,7 @@ static int api_circfill(lua_State *lua) {
         circle.sy + radius < circle.clip_y0 ||
         circle.sy - radius > circle.clip_y1 ||
         circle.clip_x0 > circle.clip_x1 || circle.clip_y0 > circle.clip_y1)
-        return 0;
+        return;
     circle.color = color;
     circle.mapped = runtime->draw_palette[color & 15] & 15;
     circle.patterned = runtime->fill_pattern_active;
@@ -1343,6 +1434,25 @@ static int api_circfill(lua_State *lua) {
         }
     }
     runtime->screen_ram_dirty = 1;
+}
+
+static void circfill_shape(p8p_runtime_t *runtime, const int *args,
+                           int color) {
+    fill_circle(runtime, args[0], args[1], args[2], color);
+}
+
+static int api_circfill(lua_State *lua) {
+    profile_api(P8P_API_GRAPHICS);
+    p8p_runtime_t *runtime = active_runtime;
+    int args[3];
+    args[0] = arg_int(lua, 1, 0);
+    args[1] = arg_int(lua, 2, 0);
+    args[2] = arg_int(lua, 3, 4);
+    int color = arg_pen(lua, 4, runtime);
+    if (inverted_fill(runtime, color))
+        draw_inverted(runtime, circfill_shape, args, color);
+    else
+        fill_circle(runtime, args[0], args[1], args[2], color);
     return 0;
 }
 
@@ -1536,11 +1646,22 @@ static int api_oval(lua_State *lua) {
     return 0;
 }
 
+static void ovalfill_shape(p8p_runtime_t *runtime, const int *args,
+                           int color) {
+    draw_oval(runtime, args[0], args[1], args[2], args[3], color, 1);
+}
+
 static int api_ovalfill(lua_State *lua) {
     profile_api(P8P_API_GRAPHICS);
-    draw_oval(active_runtime, arg_int(lua, 1, 0), arg_int(lua, 2, 0),
-              arg_int(lua, 3, 0), arg_int(lua, 4, 0),
-              arg_pen(lua, 5, active_runtime), 1);
+    p8p_runtime_t *runtime = active_runtime;
+    int args[4];
+    for (int i = 0; i < 4; ++i)
+        args[i] = arg_int(lua, i + 1, 0);
+    int color = arg_pen(lua, 5, runtime);
+    if (inverted_fill(runtime, color))
+        draw_inverted(runtime, ovalfill_shape, args, color);
+    else
+        ovalfill_shape(runtime, args, color);
     return 0;
 }
 

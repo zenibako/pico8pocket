@@ -1153,6 +1153,61 @@ static void peek_operators_see_screen_and_wrap(void) {
     p8p_cart_destroy(&cart);
 }
 
+/* 0x5f34 (issue #79).  Bit 0: a colour argument with 0x1000.0000 set also
+ * sets the fill pattern from its fraction, and 0x100/0x200/0x400 as fillp()'s
+ * transparency/sprite/secondary bits.  Bit 1: a filled shape whose colour has
+ * 0x1800.0000 set fills the clip rectangle outside the shape.  The expected
+ * screen hashes come from PICO-8 0.2.7 (probe cart inv_probe6.p8). */
+static void colour_fill_pattern_and_inverted_fills(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "function h()\n"
+        " local h=0\n"
+        " for i=0x6000,0x7ffc,4 do h=(h<<>5)+$i end\n"
+        " return h\n"
+        "end\n"
+        "r={}\n"
+        "function case(f,fp,v,draw,want,wfp,wfb)\n"
+        " poke(0x5f34,0) fillp() clip() camera() pal() color(6) cls(1)\n"
+        " poke(0x5f34,f) fillp(fp)\n"
+        " if v==1 then clip(20,30,70,60) elseif v==2 then camera(5,7) end\n"
+        " draw()\n"
+        " local p,b=peek2(0x5f31),peek(0x5f33)\n"
+        " poke(0x5f34,0) fillp() clip() camera() pal() color(6)\n"
+        " add(r,h()==want and p==wfp and b==wfb)\n"
+        "end\n"
+        "function _draw()\n"
+        " case(2,0,0,function() circfill(64,64,20,0x18c8) end,0x6d41.c760,0,0)\n"
+        " case(2,0x5a5a.8,2,function() circfill(64,64,20,0x18c8) end,0x52a5.3c1f,0x5a5a,1)\n"
+        " case(2,0,1,function() rectfill(40,40,80,90,0x18c8) end,0x6c17.7ff4,0,0)\n"
+        " case(3,0,0,function() ovalfill(90,80,30,40,0x18c8.5a5a) end,0x923f.cbc9,0x5a5a,0)\n"
+        " case(3,0x5a5a,0,function() rrectfill(40,40,40,50,6,0x19c8.5a5a) end,0xd9af.5fc1,0x5a5a,1)\n"
+        " case(2,0,1,function() circfill(64,64,-1,0x18c8) end,0x4dbf.b994,0,0)\n"
+        " case(2,0,0,function() rectfill(-10,-10,-5,-5,0x18c8) end,0x3173.1317,0,0)\n"
+        " case(2,0,0,function() circ(64,64,20,0x18c8) end,0xd893.4ea9,0,0)\n"
+        " case(1,0,0,function() circfill(64,64,20,0x1cc8.5a5a) end,0xdfbd.151c,0x5a5a,4)\n"
+        " case(1,0,0,function() line(3,4,90,60,0x10c8.5a5a) end,0xdc2e.bdbe,0x5a5a,0)\n"
+        " case(3,0x5a5a,0,function() circfill(64,64,20,0x808) end,0xbf6d.b704,0x5a5a,0)\n"
+        " case(2,0,1,function() rrectfill(30,30,20,60,40,0x1808) end,0x67ec.9a97,0,0)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 12; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL 0x5f34 case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
 /* A shorthand if whose statement holds a multi-line [[ ]] string still ends
  * at the end of its line, and its else may follow the string (issue #78).
  * The first form is from a shrinko8 build of BBS beam3_1-7, which PICO-8
@@ -2264,6 +2319,7 @@ int main(void) {
     multi_value_peek_poke_matches_pico8();
     memory_addresses_wrap_like_pico8();
     peek_operators_see_screen_and_wrap();
+    colour_fill_pattern_and_inverted_fills();
     short_if_with_long_string();
     screen_mode_consumers_use_display_framebuffer();
     update_callbacks_follow_init();
