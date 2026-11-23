@@ -206,6 +206,20 @@ static const p8p_control_profile_t *apply_button_glyphs(
     return controls;
 }
 
+/* A multicart load() runs the child's top-level code and _init() inside
+ * p8p_multicart_poll, so its glyphs are set from the multicart loader. */
+typedef struct glyph_preload {
+    p8p_runtime_t *runtime;
+    const p8p_settings_t *settings;
+} glyph_preload_t;
+
+static void preload_button_glyphs(void *userdata, const p8p_cart_t *cart) {
+    const glyph_preload_t *preload = (const glyph_preload_t *)userdata;
+    p8p_cart_hash_t cart_hash;
+    p8p_cart_content_hash(cart, &cart_hash);
+    apply_button_glyphs(preload->runtime, preload->settings, &cart_hash);
+}
+
 static void set_diagnostics(p8p_runtime_t *runtime, int *visible,
                             runtime_profile_t *profile,
                             uint32_t *average_instructions,
@@ -531,6 +545,7 @@ int main(int argc, char **argv) {
     cart_signature_t cart_signature = {-1, 0};
     uint32_t cart_checked_us;
     const char *pack_path = "slot:20";
+    glyph_preload_t glyph_preload = {NULL, &settings};
 
 #ifdef OF_PC
     if (argc > 1)
@@ -567,6 +582,9 @@ int main(int argc, char **argv) {
                 pack_path = "bbs.p8pack";
 #endif
             multicart = p8p_multicart_create(runtime, &loaded_cart, pack_path);
+            glyph_preload.runtime = runtime;
+            p8p_multicart_set_preload(multicart, preload_button_glyphs,
+                                      &glyph_preload);
         }
         p8p_cart_content_hash(&loaded_cart, &cart_hash);
         if (runtime) {
@@ -693,6 +711,8 @@ int main(int argc, char **argv) {
                     cart = next_info;
                     multicart = p8p_multicart_create(runtime, &loaded_cart,
                                                      pack_path);
+                    p8p_multicart_set_preload(multicart, preload_button_glyphs,
+                                              &glyph_preload);
                     p8p_cart_content_hash(&loaded_cart, &cart_hash);
                     p8p_menu_destroy(menu);
                     menu = p8p_menu_create(&settings, &cart_hash,

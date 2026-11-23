@@ -20,14 +20,15 @@ static void write_pack(const char *path) {
         text("function _init() cls(stat(6)=='hello' and 7 or 8) end\nfunction _update() if btnp(5) then load('#grandchild','back child','next') end end\n"),
         text("function _init() cls(stat(6)=='next' and 11 or 8) end\n"),
         text("function _init() error('broken target') end\n"),
+        text("function _init() cls() print('\\142',8,8,7) end\n"),
     };
-    const char *ids[] = {"child", "grandchild", "broken"};
+    const char *ids[] = {"child", "grandchild", "broken", "glyph"};
     unsigned char header[16] = {'P','8','P','B','B','S','1',0};
-    put32(header + 8, 3);
+    put32(header + 8, 4);
     FILE *file = fopen(path, "wb"); assert(file);
     assert(fwrite(header, 1, sizeof header, file) == sizeof header);
-    unsigned offset = 16 + 3 * 64;
-    for (unsigned i = 0; i < 3; ++i) {
+    unsigned offset = 16 + 4 * 64;
+    for (unsigned i = 0; i < 4; ++i) {
         unsigned char record[64] = {};
         strcpy((char *)record, ids[i]);
         put32(record + 48, offset);
@@ -44,6 +45,32 @@ static p8p_cart_t source_cart(const char *body) {
     std::string data = text(body); p8p_cart_t cart = {};
     assert(p8p_cart_load_text_memory((const uint8_t *)data.data(), data.size(), &cart) == 0);
     return cart;
+}
+
+/* Stands in for main.c's per-cart button glyphs: a full 9x7 box for every
+ * cart except the first parent. */
+static const uint16_t box_glyph[7] = {0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff};
+struct preload_log {
+    p8p_runtime_t *runtime;
+    p8p_cart_hash_t parent;
+    unsigned calls;
+};
+
+static void preload_glyphs(void *userdata, const p8p_cart_t *cart) {
+    preload_log *log = (preload_log *)userdata;
+    p8p_cart_hash_t hash;
+    p8p_cart_content_hash(cart, &hash);
+    bool parent = memcmp(&hash, &log->parent, sizeof hash) == 0;
+    p8p_runtime_set_button_glyphs(log->runtime, parent ? NULL : box_glyph, NULL);
+    ++log->calls;
+}
+
+static bool box_drawn_at_8_8(p8p_runtime_t *runtime) {
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int row = 7; row < 14; ++row)
+        for (int column = 7; column < 16; ++column)
+            if (!fb[row * 128 + column]) return false;
+    return true;
 }
 
 static void request(p8p_runtime_t *runtime, const char *id) {
@@ -126,6 +153,23 @@ int main() {
     (void)p8p_runtime_debug_eval_int(runtime, "(function() load('#grandchild') return 0 end)()", &ignored);
     assert(p8p_multicart_poll(session, error, sizeof error) == 1);
     assert(p8p_runtime_request_back(runtime) == -1);
+
+    /* A child's _init() prints with its own glyphs, set before it runs
+     * (issue #83); returning sets them again for the cart returned to. */
+    request(runtime, "glyph");
+    assert(p8p_multicart_poll(session, error, sizeof error) == 1);
+    assert(!box_drawn_at_8_8(runtime));
+    preload_log log = {runtime, parent_hash, 0};
+    p8p_multicart_set_preload(session, preload_glyphs, &log);
+    request(runtime, "glyph");
+    assert(p8p_multicart_poll(session, error, sizeof error) == 1);
+    assert(log.calls == 1);
+    assert(box_drawn_at_8_8(runtime));
+    assert(p8p_runtime_request_back(runtime) == 0);
+    assert(p8p_multicart_poll(session, error, sizeof error) == 1);
+    assert(log.calls == 2);
+    assert(p8p_multicart_restart(session) == 0);
+    assert(log.calls == 3);
 
     p8p_multicart_destroy(session);
     session = p8p_multicart_create(runtime, &active, NULL); assert(session);
