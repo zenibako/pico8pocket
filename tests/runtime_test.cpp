@@ -1210,10 +1210,11 @@ static uint8_t screen_color(p8p_runtime_t *runtime, uint8_t color) {
 static void screen_mode_consumers_use_display_framebuffer(void) {
     /* Mode 129 mirrors horizontally: display (x,y) shows screen (127-x,y).
      * The left half is 8 (shown as 2 through the screen palette); screen
-     * (0,60) is 9, so the display's (127,60) is 9 and its (0,60) is 2. */
+     * (0,60) is 9, so the display's (127,60) is 9 and its (0,60) is 2.
+     * Colours 0 and 9, which the menu checks sample, are remapped too. */
     static const char source[] =
         "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
-        "poke(0x5f2c,129) pal(8,2,1)\n"
+        "poke(0x5f2c,129) pal(8,2,1) pal(0,13,1) pal(9,14,1)\n"
         "function _draw()\n"
         " poke(0x5f55,0x60) cls() rectfill(0,0,63,127,8) pset(0,60,9)\n"
         " if btn(0) then poke(0x5f55,0x80) cls(5) pset(1,1,6) end\n"
@@ -1274,6 +1275,7 @@ static void screen_mode_consumers_use_display_framebuffer(void) {
         dim_xor = 0x40;
         /* Pause menu: (0,0) is outside the panel and is not dimmed. */
         p8p_menu_open_pause(menu, runtime, 0, 0);
+        CHECK(screen_color(runtime, 0) == 13);
         CHECK(p8p_menu_framebuffer(menu)[0] == screen_color(runtime, shown[0]));
         CHECK(p8p_menu_framebuffer(menu)[0] != screen_color(runtime, raw[0]));
         /* Select menu: (127,60) is past every row's text and highlight, and
@@ -1282,7 +1284,8 @@ static void screen_mode_consumers_use_display_framebuffer(void) {
         int select_pixel = 60 * 128 + 127;
         CHECK(p8p_menu_framebuffer(menu)[select_pixel] ==
               p8p_platform_dim_color(screen_color(runtime, shown[select_pixel])));
-        CHECK(p8p_menu_framebuffer(menu)[select_pixel] == (9 ^ 0x40));
+        CHECK(screen_color(runtime, 9) == 14);
+        CHECK(p8p_menu_framebuffer(menu)[select_pixel] == (14 ^ 0x40));
         dim_xor = 0;
         p8p_menu_destroy(menu);
     }

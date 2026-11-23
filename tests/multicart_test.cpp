@@ -20,15 +20,16 @@ static void write_pack(const char *path) {
         text("function _init() cls(stat(6)=='hello' and 7 or 8) end\nfunction _update() if btnp(5) then load('#grandchild','back child','next') end end\n"),
         text("function _init() cls(stat(6)=='next' and 11 or 8) end\n"),
         text("function _init() error('broken target') end\n"),
+        text("-- boxed\nfunction _init() cls() print('\\142',8,8,7) end\n"),
         text("function _init() cls() print('\\142',8,8,7) end\n"),
     };
-    const char *ids[] = {"child", "grandchild", "broken", "glyph"};
+    const char *ids[] = {"child", "grandchild", "broken", "glyph", "plain"};
     unsigned char header[16] = {'P','8','P','B','B','S','1',0};
-    put32(header + 8, 4);
+    put32(header + 8, 5);
     FILE *file = fopen(path, "wb"); assert(file);
     assert(fwrite(header, 1, sizeof header, file) == sizeof header);
-    unsigned offset = 16 + 4 * 64;
-    for (unsigned i = 0; i < 4; ++i) {
+    unsigned offset = 16 + 5 * 64;
+    for (unsigned i = 0; i < 5; ++i) {
         unsigned char record[64] = {};
         strcpy((char *)record, ids[i]);
         put32(record + 48, offset);
@@ -47,21 +48,18 @@ static p8p_cart_t source_cart(const char *body) {
     return cart;
 }
 
-/* Stands in for main.c's per-cart button glyphs: a full 9x7 box for every
- * cart except the first parent. */
+/* Stands in for main.c's per-cart button glyphs: a full 9x7 box for the
+ * cart marked "-- boxed", PICO-8's own glyph for every other cart. */
 static const uint16_t box_glyph[7] = {0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff, 0x1ff};
 struct preload_log {
     p8p_runtime_t *runtime;
-    p8p_cart_hash_t parent;
     unsigned calls;
 };
 
 static void preload_glyphs(void *userdata, const p8p_cart_t *cart) {
     preload_log *log = (preload_log *)userdata;
-    p8p_cart_hash_t hash;
-    p8p_cart_content_hash(cart, &hash);
-    bool parent = memcmp(&hash, &log->parent, sizeof hash) == 0;
-    p8p_runtime_set_button_glyphs(log->runtime, parent ? NULL : box_glyph, NULL);
+    bool boxed = cart->lua && strstr(cart->lua, "-- boxed") != NULL;
+    p8p_runtime_set_button_glyphs(log->runtime, boxed ? box_glyph : NULL, NULL);
     ++log->calls;
 }
 
@@ -154,22 +152,27 @@ int main() {
     assert(p8p_multicart_poll(session, error, sizeof error) == 1);
     assert(p8p_runtime_request_back(runtime) == -1);
 
-    /* A child's _init() prints with its own glyphs, set before it runs
-     * (issue #83); returning sets them again for the cart returned to. */
+    /* A cart's _init() prints with its own glyphs, set before it runs
+     * (issue #83), whether it is entered, returned to or restarted. */
     request(runtime, "glyph");
     assert(p8p_multicart_poll(session, error, sizeof error) == 1);
-    assert(!box_drawn_at_8_8(runtime));
-    preload_log log = {runtime, parent_hash, 0};
+    assert(!box_drawn_at_8_8(runtime));  /* no preload: PICO-8's glyph */
+    preload_log log = {runtime, 0};
     p8p_multicart_set_preload(session, preload_glyphs, &log);
+    request(runtime, "plain");
+    assert(p8p_multicart_poll(session, error, sizeof error) == 1);
+    assert(log.calls == 1 && !box_drawn_at_8_8(runtime));
     request(runtime, "glyph");
     assert(p8p_multicart_poll(session, error, sizeof error) == 1);
-    assert(log.calls == 1);
-    assert(box_drawn_at_8_8(runtime));
+    assert(log.calls == 2 && box_drawn_at_8_8(runtime));
+    /* Restart sets the glyphs again before _init(). */
+    p8p_runtime_set_button_glyphs(runtime, NULL, NULL);
+    assert(p8p_multicart_restart(session) == 0);
+    assert(log.calls == 3 && box_drawn_at_8_8(runtime));
+    /* Returning to "plain" clears the box before its _init() prints. */
     assert(p8p_runtime_request_back(runtime) == 0);
     assert(p8p_multicart_poll(session, error, sizeof error) == 1);
-    assert(log.calls == 2);
-    assert(p8p_multicart_restart(session) == 0);
-    assert(log.calls == 3);
+    assert(log.calls == 4 && !box_drawn_at_8_8(runtime));
 
     p8p_multicart_destroy(session);
     session = p8p_multicart_create(runtime, &active, NULL); assert(session);
