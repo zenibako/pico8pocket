@@ -1151,6 +1151,52 @@ static void peek_operators_see_screen_and_wrap(void) {
     p8p_cart_destroy(&cart);
 }
 
+/* A shorthand if whose statement holds a multi-line [[ ]] string still ends
+ * at the end of its line, and its else may follow the string (issue #78).
+ * The first form is from a shrinko8 build of BBS beam3_1-7, which PICO-8
+ * 0.2.7 runs. */
+static void short_if_with_long_string(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={} s={}\n"
+        "function is(c) add(r,c) end\n"
+        "function no(v) add(s,v) end\n"
+        "eh=true\n"
+        "if(eh)no[[78,35,251,22\n  78,36,38,38]]else no[[78,35,251,26\n  78,36,38,104]]\n"
+        "eh=false\n"
+        "if(eh)no[[a\nb]]else no[[c\nd]]\n"
+        "if(eh)no[[e\nf]]\n"
+        "no('after')\n"
+        "if(not eh)no[[\ng\nh]]no('same')\n"
+        "function _draw()\n"
+        " is(s[1]=='78,35,251,22\\n  78,36,38,38')\n"
+        " is(s[2]=='c\\nd')\n"
+        " is(s[3]=='after')\n"
+        " is(s[4]=='g\\nh' and s[5]=='same' and #s==5)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    int loaded = p8p_runtime_load(runtime, &cart);
+    if (loaded != 0)
+        fprintf(stderr, "FAIL short if load: %s\n", p8p_runtime_error(runtime));
+    CHECK(loaded == 0);
+    if (loaded == 0) {
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+        for (int index = 0; index < 4; ++index) {
+            if (fb[index] != 11)
+                fprintf(stderr, "FAIL short if case %d\n", index + 1);
+            CHECK(fb[index] == 11);
+        }
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
 static void multi_value_peek_poke_matches_pico8(void) {
     /* Each case was checked against PICO-8 0.2.7. */
     static const char source[] =
@@ -2122,6 +2168,7 @@ int main(void) {
     multi_value_peek_poke_matches_pico8();
     memory_addresses_wrap_like_pico8();
     peek_operators_see_screen_and_wrap();
+    short_if_with_long_string();
     update_callbacks_follow_init();
     secondary_palette_matches_pico8();
     circles_match_pico8();

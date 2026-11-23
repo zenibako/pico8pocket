@@ -57,6 +57,7 @@ Z8LUA_PATCHES=(
     "$PROJECT_ROOT/patches/z8lua-call-fastpath.patch"
     "$PROJECT_ROOT/patches/z8lua-delegate-index.patch"
     "$PROJECT_ROOT/patches/z8lua-peek-screen.patch"
+    "$PROJECT_ROOT/patches/z8lua-short-if-long-string.patch"
 )
 
 fetch_one() {

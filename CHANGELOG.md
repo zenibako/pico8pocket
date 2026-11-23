@@ -9,6 +9,10 @@
 - With CART ICONS on, a cart started by a multicart `load()` prints the
   button icons of its own control mapping from its first frame. Text it
   printed in `_init()` used to show the previous cart's icons. (#83)
+- A shorthand `if` whose statement holds a `[[ ]]` string that spans lines,
+  such as `if(c)f[[a
+  b]]else f[[c]]` in shrinko8 output, loads instead of stopping with
+  "'end' expected near 'else'". (#78)
 
 ## 0.1.1 — 2026-11-21
 
