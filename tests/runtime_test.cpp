@@ -1113,6 +1113,44 @@ static void memory_addresses_wrap_like_pico8(void) {
     p8p_cart_destroy(&cart);
 }
 
+/* The @, % and $ operators read RAM directly, so they need the same screen
+ * flush and 0xffff wrap as peek/peek2/peek4 (issue #77).  The first four
+ * values and the wrap were measured in PICO-8 0.2.7. */
+static void peek_operators_see_screen_and_wrap(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function _draw()\n"
+        " cls(7) is($0x6000==0x7777.7777)\n"
+        " cls() rectfill(0,0,7,0,7) is(@0x6000==119)\n"
+        " cls() rectfill(0,0,7,0,7) is(%0x6000==0x7777)\n"
+        " cls() pset(127,127,9) is(@0x7fff==0x90)\n"
+        " poke(0xffff,9) poke(0,1,2,3) is(%-1==265 and %0xffff==265)\n"
+        " is($-1==0x0302.0109 and $0xffff==peek4(0xffff))\n"
+        " poke(0xfffe,4) is($0xfffe==peek4(0xfffe))\n"
+        " poke(0x5f55,0) cls(5) poke(0x5f55,0x60) is(@0==0x55 and %0x1ffe==0x5555)\n"
+        " poke(0x5f55,0) cls(6) is($0x100==0x6666.6666) poke(0x5f55,0x60)\n"
+        " cls(1) is(@0x5fff==peek(0x5fff) and @0x6000==0x11)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 10; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL peek operator case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
 static void multi_value_peek_poke_matches_pico8(void) {
     /* Each case was checked against PICO-8 0.2.7. */
     static const char source[] =
@@ -2083,6 +2121,7 @@ int main(void) {
     map_default_size_matches_pico8();
     multi_value_peek_poke_matches_pico8();
     memory_addresses_wrap_like_pico8();
+    peek_operators_see_screen_and_wrap();
     update_callbacks_follow_init();
     secondary_palette_matches_pico8();
     circles_match_pico8();
