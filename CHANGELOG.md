@@ -13,6 +13,13 @@
   such as `if(c)f[[a
   b]]else f[[c]]` in shrinko8 output, loads instead of stopping with
   "'end' expected near 'else'". (#78)
+- `poke(0x5f34, ...)` works. With bit 0 set, a colour argument with
+  `0x1000.0000` also sets the fill pattern from its fraction (`0x100`,
+  `0x200` and `0x400` are the transparency, sprite and secondary-palette
+  bits), so `circfill(x, y, r, 0x1008.5a5a)` draws a patterned circle. With
+  bit 1 set, `rectfill`, `circfill`, `ovalfill` and `rrectfill` with
+  `0x1800.0000` in the colour fill everything in the clip rectangle except
+  the shape. Both match PICO-8 0.2.7. (#79)
 
 ## 0.1.1 — 2026-11-21
 
