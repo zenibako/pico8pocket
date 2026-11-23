@@ -1554,22 +1554,68 @@ static int api_tline(lua_State *lua) {
     int dy = -abs(y1 - y0);
     int sy = y0 < y1 ? 1 : -1;
     int error = dx + dy;
+    /* A horizontal line on a row outside the screen or clip draws nothing
+     * and has no other effect (pd_rotate-style rotated sprites send many). */
+    if (y0 == y1) {
+        int screen_y = y0 - runtime->camera_y;
+        if ((unsigned)screen_y >= 128u || screen_y < runtime->clip_y0 ||
+            screen_y >= runtime->clip_y1)
+            return 0;
+    }
+    /* Everything below is constant for the whole line.  map_get() and the
+     * wrap modulo used to cost three divides per pixel, which RV32 does in
+     * many cycles; the map cell is also reused while mx/my stay in it. */
+    int wrap_x = runtime->ram[0x5f38] ? runtime->ram[0x5f38] : 256;
+    int wrap_y = runtime->ram[0x5f39] ? runtime->ram[0x5f39] : 256;
+    int mask_x = (wrap_x & (wrap_x - 1)) == 0 ? wrap_x - 1 : -1;
+    int mask_y = (wrap_y & (wrap_y - 1)) == 0 ? wrap_y - 1 : -1;
+    int offset_x = runtime->ram[0x5f3a];
+    int offset_y = runtime->ram[0x5f3b];
+    int map_width, map_height;
+    map_dimensions(runtime, &map_width, &map_height);
+    int mapping = runtime->ram[0x5f56];
+    int sprite_base = (int)runtime->ram[0x5f54] << 8;
+    int32_t cached_cell_x = 0, cached_cell_y = 0;
+    int sprite = 0;
+    int have_cell = 0;
     for (;;) {
         int32_t mx_bits = mx.bits();
         int32_t my_bits = my.bits();
-        int wrap_x = runtime->ram[0x5f38] ? runtime->ram[0x5f38] : 256;
-        int wrap_y = runtime->ram[0x5f39] ? runtime->ram[0x5f39] : 256;
-        int map_x = (mx_bits >> 16) % wrap_x;
-        int map_y = (my_bits >> 16) % wrap_y;
-        if (map_x < 0) map_x += wrap_x;
-        if (map_y < 0) map_y += wrap_y;
-        map_x += runtime->ram[0x5f3a];
-        map_y += runtime->ram[0x5f3b];
-        int sprite = map_get(runtime, map_x, map_y);
+        int32_t cell_x = mx_bits >> 16;
+        int32_t cell_y = my_bits >> 16;
+        if (!have_cell || cell_x != cached_cell_x || cell_y != cached_cell_y) {
+            int map_x, map_y;
+            if (mask_x >= 0) {
+                map_x = cell_x & mask_x;
+            } else {
+                map_x = cell_x % wrap_x;
+                if (map_x < 0) map_x += wrap_x;
+            }
+            if (mask_y >= 0) {
+                map_y = cell_y & mask_y;
+            } else {
+                map_y = cell_y % wrap_y;
+                if (map_y < 0) map_y += wrap_y;
+            }
+            map_x += offset_x;
+            map_y += offset_y;
+            if (map_x >= map_width || map_y >= map_height) {
+                sprite = 0;
+            } else {
+                int index = map_y * map_width + map_x;
+                sprite = mapping >= 0x80 ? runtime->ram[(mapping << 8) + index]
+                         : index < 4096  ? runtime->ram[0x2000 + index]
+                                         : runtime->ram[index];
+            }
+            cached_cell_x = cell_x;
+            cached_cell_y = cell_y;
+            have_cell = 1;
+        }
         if (sprite) {
             int source_x = (sprite & 15) * 8 + ((mx_bits >> 13) & 7);
             int source_y = (sprite >> 4) * 8 + ((my_bits >> 13) & 7);
-            uint8_t color = sprite_get(runtime, source_x, source_y);
+            uint8_t color = sprite_get_at_base(runtime, sprite_base, source_x,
+                                               source_y);
             if (!runtime->transparent[color]) {
                 int screen_x = x0 - runtime->camera_x;
                 int screen_y = y0 - runtime->camera_y;
