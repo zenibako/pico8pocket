@@ -20,7 +20,24 @@ struct p8p_multicart {
     parent_cart_t parents[PARENT_LIMIT];
     unsigned depth;
     char pack_error[192];
+    p8p_multicart_preload_fn preload;
+    void *preload_userdata;
 };
+
+static int load_cart(p8p_multicart_t *session, p8p_cart_t *cart,
+                     const char *params, const char *breadcrumb) {
+    if (session->preload)
+        session->preload(session->preload_userdata, cart);
+    return p8p_runtime_load_context(session->runtime, cart, params, breadcrumb);
+}
+
+void p8p_multicart_set_preload(p8p_multicart_t *session,
+                               p8p_multicart_preload_fn preload, void *userdata) {
+    if (!session)
+        return;
+    session->preload = preload;
+    session->preload_userdata = userdata;
+}
 
 static int fail(char *error, size_t size, const char *message) {
     if (error && size)
@@ -67,9 +84,9 @@ int p8p_multicart_restart(p8p_multicart_t *session) {
         return -1;
     /* A restored state may have a different parameter string. Use the runtime
      * context for restart; the manager keeps only saved parent contexts. */
-    return p8p_runtime_load_context(session->runtime, session->active,
-                                    p8p_runtime_parameters(session->runtime),
-                                    p8p_runtime_breadcrumb(session->runtime));
+    return load_cart(session, session->active,
+                     p8p_runtime_parameters(session->runtime),
+                     p8p_runtime_breadcrumb(session->runtime));
 }
 
 int p8p_multicart_poll(p8p_multicart_t *session, char *error, size_t error_size) {
@@ -92,8 +109,8 @@ int p8p_multicart_poll(p8p_multicart_t *session, char *error, size_t error_size)
         if (!session->depth)
             return fail(error, error_size, "No previous cartridge is available.");
         parent = &session->parents[session->depth - 1];
-        result = p8p_runtime_load_context(session->runtime, parent->cart,
-                                          parent->params, parent->breadcrumb);
+        result = load_cart(session, parent->cart, parent->params,
+                           parent->breadcrumb);
         if (result != 0)
             return fail(error, error_size, p8p_runtime_error(session->runtime));
         p8p_cart_destroy(session->active);
@@ -127,8 +144,7 @@ int p8p_multicart_poll(p8p_multicart_t *session, char *error, size_t error_size)
                  sizeof(session->parents[session->depth].breadcrumb), "%s",
                  p8p_runtime_breadcrumb(session->runtime));
     }
-    result = p8p_runtime_load_context(session->runtime, &target,
-                                      request.params, request.breadcrumb);
+    result = load_cart(session, &target, request.params, request.breadcrumb);
     if (result != 0) {
         free(saved_parent); /* active still owns this cart's Lua allocation */
         p8p_cart_destroy(&target);

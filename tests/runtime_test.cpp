@@ -19,7 +19,9 @@
 /* Platform hooks used by the system menu. */
 void p8p_platform_audio_set_volume(unsigned) {}
 unsigned p8p_platform_set_scale(unsigned scale) { return scale; }
-uint8_t p8p_platform_dim_color(uint8_t color) { return color; }
+/* Identity unless a test sets dim_xor to tell dimmed pixels apart. */
+static uint8_t dim_xor;
+uint8_t p8p_platform_dim_color(uint8_t color) { return color ^ dim_xor; }
 
 static int failures;
 static int service_hook_calls;
@@ -1113,6 +1115,184 @@ static void memory_addresses_wrap_like_pico8(void) {
     p8p_cart_destroy(&cart);
 }
 
+/* The @, % and $ operators read RAM directly, so they need the same screen
+ * flush and 0xffff wrap as peek/peek2/peek4 (issue #77).  The first four
+ * values and the wrap were measured in PICO-8 0.2.7. */
+static void peek_operators_see_screen_and_wrap(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={}\n"
+        "function is(c) add(r,c) end\n"
+        "function _draw()\n"
+        " cls(7) is($0x6000==0x7777.7777)\n"
+        " cls() rectfill(0,0,7,0,7) is(@0x6000==119)\n"
+        " cls() rectfill(0,0,7,0,7) is(%0x6000==0x7777)\n"
+        " cls() pset(127,127,9) is(@0x7fff==0x90)\n"
+        " poke(0xffff,9) poke(0,1,2,3) is(%-1==265 and %0xffff==265)\n"
+        " is($-1==0x0302.0109 and $0xffff==peek4(0xffff))\n"
+        " poke(0xfffe,4) is($0xfffe==peek4(0xfffe))\n"
+        " poke(0x5f55,0) cls(5) poke(0x5f55,0x60) is(@0==0x55 and %0x1ffe==0x5555)\n"
+        " poke(0x5f55,0) cls(6) is($0x100==0x6666.6666) poke(0x5f55,0x60)\n"
+        " cls(1) is(@0x5fff==peek(0x5fff) and @0x6000==0x11)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+    for (int index = 0; index < 10; ++index) {
+        if (fb[index] != 11)
+            fprintf(stderr, "FAIL peek operator case %d\n", index + 1);
+        CHECK(fb[index] == 11);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+/* A shorthand if whose statement holds a multi-line [[ ]] string still ends
+ * at the end of its line, and its else may follow the string (issue #78).
+ * The first form is from a shrinko8 build of BBS beam3_1-7, which PICO-8
+ * 0.2.7 runs. */
+static void short_if_with_long_string(void) {
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "r={} s={}\n"
+        "function is(c) add(r,c) end\n"
+        "function no(v) add(s,v) end\n"
+        "eh=true\n"
+        "if(eh)no[[78,35,251,22\n  78,36,38,38]]else no[[78,35,251,26\n  78,36,38,104]]\n"
+        "eh=false\n"
+        "if(eh)no[[a\nb]]else no[[c\nd]]\n"
+        "if(eh)no[[e\nf]]\n"
+        "no('after')\n"
+        "if(not eh)no[[\ng\nh]]no('same')\n"
+        "function _draw()\n"
+        " is(s[1]=='78,35,251,22\\n  78,36,38,38')\n"
+        " is(s[2]=='c\\nd')\n"
+        " is(s[3]=='after')\n"
+        " is(s[4]=='g\\nh' and s[5]=='same' and #s==5)\n"
+        " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    int loaded = p8p_runtime_load(runtime, &cart);
+    if (loaded != 0)
+        fprintf(stderr, "FAIL short if load: %s\n", p8p_runtime_error(runtime));
+    CHECK(loaded == 0);
+    if (loaded == 0) {
+        CHECK(p8p_runtime_step(runtime, 0) == 0);
+        const uint8_t *fb = p8p_runtime_framebuffer(runtime);
+        for (int index = 0; index < 4; ++index) {
+            if (fb[index] != 11)
+                fprintf(stderr, "FAIL short if case %d\n", index + 1);
+            CHECK(fb[index] == 11);
+        }
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
+static uint8_t screen_color(p8p_runtime_t *runtime, uint8_t color) {
+    const uint8_t *palette = p8p_runtime_screen_palette(runtime);
+    return palette ? palette[color & 15] : color;
+}
+
+/* Presentation, save-state thumbnails and menu backdrops all show the
+ * 0x5f2c-transformed screen memory, never the raw framebuffer or a
+ * redirected draw target (issue #69). */
+static void screen_mode_consumers_use_display_framebuffer(void) {
+    /* Mode 129 mirrors horizontally: display (x,y) shows screen (127-x,y).
+     * The left half is 8 (shown as 2 through the screen palette); screen
+     * (0,60) is 9, so the display's (127,60) is 9 and its (0,60) is 2.
+     * Colours 0 and 9, which the menu checks sample, are remapped too. */
+    static const char source[] =
+        "pico-8 cartridge // http://www.pico-8.com\nversion 42\n__lua__\n"
+        "poke(0x5f2c,129) pal(8,2,1) pal(0,13,1) pal(9,14,1)\n"
+        "function _draw()\n"
+        " poke(0x5f55,0x60) cls() rectfill(0,0,63,127,8) pset(0,60,9)\n"
+        " if btn(0) then poke(0x5f55,0x80) cls(5) pset(1,1,6) end\n"
+        "end\n";
+    p8p_cart_t cart = {};
+    p8p_runtime_t *runtime = p8p_runtime_create();
+    CHECK(runtime != NULL);
+    if (!runtime)
+        return;
+    CHECK(p8p_cart_load_text_memory((const uint8_t *)source,
+                                    sizeof(source) - 1, &cart) == 0);
+    CHECK(p8p_runtime_load(runtime, &cart) == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    const uint8_t *raw = p8p_runtime_framebuffer(runtime);
+    const uint8_t *shown = p8p_runtime_display_framebuffer(runtime);
+    CHECK(raw[0] == 8 && raw[127] == 0 && raw[60 * 128 + 127] == 0);
+    CHECK(shown[0] == 0 && shown[127] == 8 && shown[60 * 128 + 127] == 9);
+
+    /* 1. Drawing redirected with 0x5f55 (while left is held) still
+     * presents screen memory. */
+    CHECK(p8p_runtime_step(runtime, 1) == 0);
+    shown = p8p_runtime_display_framebuffer(runtime);
+    CHECK(shown[0] == 0 && shown[127] == 8 && shown[60 * 128 + 127] == 9);
+    CHECK(shown[1 * 128 + 126] == 8 && shown[128 + 1] == 0);
+    CHECK(p8p_runtime_step(runtime, 0) == 0);
+    shown = p8p_runtime_display_framebuffer(runtime);
+
+    /* 2. The save-state thumbnail samples the display framebuffer. */
+    char store_path[] = "/tmp/pico8pocket-thumb-XXXXXX";
+    int store_fd = mkstemp(store_path);
+    CHECK(store_fd >= 0);
+    if (store_fd >= 0) {
+        close(store_fd);
+        p8p_cart_hash_t hash = {};
+        p8p_state_meta_t meta = {};
+        p8p_cart_content_hash(&cart, &hash);
+        CHECK(p8p_state_save_file(store_path, &hash, runtime) == 0);
+        CHECK(p8p_state_get_meta_file(store_path, &hash, &meta) == 0);
+        CHECK(meta.exists == 1);
+        int mismatches = 0;
+        for (int y = 0; y < P8P_STATE_THUMB_HEIGHT; ++y)
+            for (int x = 0; x < P8P_STATE_THUMB_WIDTH; ++x)
+                mismatches += meta.thumbnail[y * P8P_STATE_THUMB_WIDTH + x] !=
+                              screen_color(runtime, shown[y * 2 * 128 + x * 2]);
+        CHECK(mismatches == 0);
+        CHECK(meta.thumbnail[0] == screen_color(runtime, 0));
+        CHECK(meta.thumbnail[P8P_STATE_THUMB_WIDTH - 1] == 2);
+        unlink(store_path);
+    }
+
+    /* 3. Menu backdrops.  dim_xor makes dimmed pixels distinguishable. */
+    p8p_settings_t settings;
+    p8p_cart_hash_t menu_hash = {};
+    p8p_settings_defaults(&settings);
+    p8p_menu_t *menu = p8p_menu_create(&settings, &menu_hash, "p8");
+    CHECK(menu != NULL);
+    if (menu) {
+        dim_xor = 0x40;
+        /* Pause menu: (0,0) is outside the panel and is not dimmed. */
+        p8p_menu_open_pause(menu, runtime, 0, 0);
+        CHECK(screen_color(runtime, 0) == 13);
+        CHECK(p8p_menu_framebuffer(menu)[0] == screen_color(runtime, shown[0]));
+        CHECK(p8p_menu_framebuffer(menu)[0] != screen_color(runtime, raw[0]));
+        /* Select menu: (127,60) is past every row's text and highlight, and
+         * its odd x and even y keep it out of the checkerboard. */
+        p8p_menu_open(menu, runtime, 0, 1);
+        int select_pixel = 60 * 128 + 127;
+        CHECK(p8p_menu_framebuffer(menu)[select_pixel] ==
+              p8p_platform_dim_color(screen_color(runtime, shown[select_pixel])));
+        CHECK(screen_color(runtime, 9) == 14);
+        CHECK(p8p_menu_framebuffer(menu)[select_pixel] == (14 ^ 0x40));
+        dim_xor = 0;
+        p8p_menu_destroy(menu);
+    }
+    p8p_runtime_destroy(runtime);
+    p8p_cart_destroy(&cart);
+}
+
 static void multi_value_peek_poke_matches_pico8(void) {
     /* Each case was checked against PICO-8 0.2.7. */
     static const char source[] =
@@ -2083,6 +2263,9 @@ int main(void) {
     map_default_size_matches_pico8();
     multi_value_peek_poke_matches_pico8();
     memory_addresses_wrap_like_pico8();
+    peek_operators_see_screen_and_wrap();
+    short_if_with_long_string();
+    screen_mode_consumers_use_display_framebuffer();
     update_callbacks_follow_init();
     secondary_palette_matches_pico8();
     circles_match_pico8();

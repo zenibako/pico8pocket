@@ -408,6 +408,13 @@ static inline void flush_redirected_drawing(p8p_runtime_t *runtime) {
         screen_to_ram(runtime);
 }
 
+/* The @, % and $ operators read RAM directly (patches/z8lua-peek-screen.patch);
+ * z8lua calls this first while the framebuffer holds undrawn pixels. */
+static void peek_operator_hook(int address, int length) {
+    if (range_touches_screen(address, length))
+        screen_to_ram(active_runtime);
+}
+
 static int range_touches_cartdata(int address, int length) {
     if (length <= 0)
         return 0;
@@ -4118,6 +4125,8 @@ extern "C" int p8p_runtime_load_context(p8p_runtime_t *runtime,
     active_runtime = runtime;
     luaL_openlibs(runtime->lua);
     lua_setpico8memory(runtime->lua, runtime->ram);
+    lua_setpico8peekhook(runtime->lua, &runtime->screen_ram_dirty,
+                         peek_operator_hook);
     register_api(runtime->lua);
     register_pico8_button_constants(runtime->lua);
     api_srand(runtime->lua);

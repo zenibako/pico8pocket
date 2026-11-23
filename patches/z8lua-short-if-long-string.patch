@@ -1,0 +1,77 @@
+Let a shorthand if's else/elseif follow a multi-line [[ ]] string in its
+statement (pico8pocket#78). shrinko8 output can contain
+`if(c)f[[a
+b]]else f[[c]]`, which PICO-8 0.2.7 runs. The lexer counts line breaks
+read inside long strings, and ifstat leaves them out when it checks that
+else is on the if's line. Long comments are left as they were.
+
+diff --git a/llex.h b/llex.h
+--- a/llex.h
++++ b/llex.h
+@@ -59,6 +59,7 @@
+   int atsol;  /* are we at start of line? */
+   int emiteol;  /* should EOL be emitted? */
+   int lastline;  /* line of last token `consumed' */
++  int longlines;  /* line breaks read inside long strings */
+   int braces;  /* braces context */
+   Token t;  /* current token */
+   Token lookahead;  /* look ahead token */
+diff --git a/llex.c b/llex.c
+--- a/llex.c
++++ b/llex.c
+@@ -175,6 +175,7 @@
+   ls->linenumber = 1;
+   ls->emiteol = 0;
+   ls->lastline = 1;
++  ls->longlines = 0;
+   ls->braces = -1;
+   ls->source = source;
+   ls->envn = luaS_new(L, LUA_ENV);  /* create env name */
+@@ -282,8 +283,10 @@
+ static void read_long_string (LexState *ls, SemInfo *seminfo, int sep) {
+   int cont = 0;
+   save_and_next(ls);  /* skip 2nd `[' */
+-  if (currIsNewline(ls))  /* string starts with a newline? */
++  if (currIsNewline(ls)) {  /* string starts with a newline? */
+     inclinenumber(ls);  /* skip it */
++    if (seminfo) ls->longlines++;
++  }
+   for (;;) {
+     switch (ls->current) {
+       case EOZ:
+@@ -312,6 +315,7 @@
+       case '\n': case '\r': {
+         save(ls, '\n');
+         inclinenumber(ls);
++        if (seminfo) ls->longlines++;
+         if (!seminfo) luaZ_resetbuffer(ls->buff);  /* avoid wasting space */
+         break;
+       }
+diff --git a/lparser.c b/lparser.c
+--- a/lparser.c
++++ b/lparser.c
+@@ -1507,10 +1507,14 @@
+   /* ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END */
+   FuncState *fs = ls->fs;
+   int escapelist = NO_JUMP;  /* exit list for finished parts */
++  /* A short IF ends at the end of its line; line breaks inside a long
++     string in it do not end the line, as in PICO-8. */
++  int longlines = ls->longlines;
+   int short_if = test_then_block(ls, &escapelist);  /* IF cond THEN block */
+-  while (ls->t.token == TK_ELSEIF && (!short_if || ls->linenumber == line))
++#define same_line(ls) ((ls)->linenumber - ((ls)->longlines - longlines) == line)
++  while (ls->t.token == TK_ELSEIF && (!short_if || same_line(ls)))
+     test_then_block(ls, &escapelist);  /* ELSEIF cond THEN block */
+-  if ((!short_if || ls->linenumber == line) && testnext(ls, TK_ELSE))
++  if ((!short_if || same_line(ls)) && testnext(ls, TK_ELSE))
+     block(ls);  /* `else' part */
+   if (!short_if)
+     check_match(ls, TK_END, TK_IF, line);
+@@ -1522,6 +1526,7 @@
+     else
+       check_match(ls, TK_EOL, TK_IF, line);  /* we expected EOL */
+   }
++#undef same_line
+   luaK_patchtohere(fs, escapelist);  /* patch escape list to 'if' end */
+ }
+ 

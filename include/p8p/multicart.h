@@ -18,6 +18,12 @@ void p8p_multicart_destroy(p8p_multicart_t *session);
  * On failure the caller must stop stepping the VM and display error. */
 int p8p_multicart_poll(p8p_multicart_t *session, char *error, size_t error_size);
 int p8p_multicart_restart(p8p_multicart_t *session);
+/* Called with each cart just before the runtime loads it (a load(), a
+ * return or a restart), so per-cart settings such as the button glyphs that
+ * print() uses are in place when its top-level code and _init() run. */
+typedef void (*p8p_multicart_preload_fn)(void *userdata, const p8p_cart_t *cart);
+void p8p_multicart_set_preload(p8p_multicart_t *session,
+                               p8p_multicart_preload_fn preload, void *userdata);
 
 #ifdef __cplusplus
 }

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- The `@`, `%` and `$` peek operators read the current screen, like
+  `peek()`, `peek2()` and `peek4()`. They used to return the screen as it was
+  at the last `peek()` call. Their reads past 0xffff wrap to 0x0000, so
+  `%0xffff` reads 0xffff and 0x0000 as in PICO-8. (#77)
+- With CART ICONS on, a cart started by a multicart `load()` prints the
+  button icons of its own control mapping from its first frame. Text it
+  printed in `_init()` used to show the previous cart's icons. (#83)
+- A shorthand `if` whose statement holds a `[[ ]]` string that spans lines,
+  such as `if(c)f[[a
+  b]]else f[[c]]` in shrinko8 output, loads instead of stopping with
+  "'end' expected near 'else'". (#78)
+
 ## 0.1.1 — 2026-11-21
 
 - The core ships the `pocket-runtime-19d9d50` openfpgaOS runtime. Its os20

@@ -1,0 +1,84 @@
+Make the @, % and $ peek operators see the current screen and wrap at
+0xffff (pico8pocket#77). The host keeps the screen in a separate
+framebuffer; a peek hook, called only while the host says that copy is
+dirty, lets it flush before the read. Reads past 0xffff wrap to 0x0000
+like peek2/peek4 in PICO-8.
+
+diff --git a/lstate.h b/lstate.h
+--- a/lstate.h
++++ b/lstate.h
+@@ -141,6 +141,10 @@
+   int gcstepmul;  /* GC `granularity' */
+   lua_CFunction panic;  /* to be called in unprotected errors */
+   lu_byte const *pico8memory;  /* pointer to PICO-8 RAM */
++  /* While *pico8peekdirty is nonzero, @/%/$ reads call pico8peekhook first
++     so the host can flush memory it keeps elsewhere (the screen). */
++  lu_byte const *pico8peekdirty;
++  void (*pico8peekhook) (int address, int length);
+   struct lua_State *mainthread;
+   const lua_Number *version;  /* pointer to version number */
+   TString *memerrmsg;  /* memory-error message */
+diff --git a/lstate.c b/lstate.c
+--- a/lstate.c
++++ b/lstate.c
+@@ -291,6 +291,8 @@
+   setnilvalue(&g->l_registry);
+   luaZ_initbuffer(L, &g->buff);
+   g->panic = NULL;
++  g->pico8peekdirty = NULL;
++  g->pico8peekhook = NULL;
+   g->version = NULL;
+   g->gcstate = GCSpause;
+   g->allgc = NULL;
+diff --git a/lapi.c b/lapi.c
+--- a/lapi.c
++++ b/lapi.c
+@@ -140,6 +140,14 @@
+   lua_unlock(L);
+ }
+ 
++LUA_API void lua_setpico8peekhook (lua_State *L, unsigned char const *dirty,
++                                   void (*hook) (int address, int length)) {
++  lua_lock(L);
++  G(L)->pico8peekdirty = hook ? dirty : NULL;
++  G(L)->pico8peekhook = hook;
++  lua_unlock(L);
++}
++
+ 
+ LUA_API const lua_Number *lua_version (lua_State *L) {
+   static const lua_Number version = LUA_VERSION_NUM;
+diff --git a/lua.h b/lua.h
+--- a/lua.h
++++ b/lua.h
+@@ -258,6 +258,8 @@
+ LUA_API void  (lua_setuservalue) (lua_State *L, int idx);
+ 
+ LUA_API void  (lua_setpico8memory) (lua_State *L, unsigned char const *p);
++LUA_API void  (lua_setpico8peekhook) (lua_State *L, unsigned char const *dirty,
++                                      void (*hook) (int address, int length));
+ 
+ /*
+ ** 'load' and 'call' functions (load and run Lua code)
+diff --git a/lvm.c b/lvm.c
+--- a/lvm.c
++++ b/lvm.c
+@@ -362,12 +362,16 @@
+ }
+ 
+ 
+-#define PEEK(ram, address) (ram && (address < 0x10000) ? ram[address] : 0)
++/* PICO-8 RAM is 64 KiB and wraps: %0xffff reads 0xffff and 0x0000. */
++#define PEEK(ram, address) (ram ? ram[(address) & 0xffff] : 0)
+ 
+ lua_Number luaV_peek(struct lua_State *L, lua_Number a, int count)
+ {
+-  unsigned char const *p = G(L)->pico8memory;
++  global_State *g = G(L);
++  unsigned char const *p = g->pico8memory;
+   int address = int(a) & 0xffff;
++  if (g->pico8peekdirty && *g->pico8peekdirty)
++    g->pico8peekhook(address, count);
+   uint32_t ret = 0;
+   switch (count) {
+     case 4:
