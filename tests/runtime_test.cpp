@@ -1137,6 +1137,7 @@ static void multi_value_peek_poke_matches_pico8(void) {
         " memset(0x9000,0x55,4) poke2(0x9000) is(peek2(0x9000)==0 and @0x9002==0x55)\n"
         " poke2(0xfffe,0x1111,0x2222) is(peek2(0xfffe)==0x1111 and peek2(0)==0x2222)\n"
         " local args={0xa000} for i=1,300 do args[i+1]=i end poke2(unpack(args)) is(peek2(0xa000+2*299)==300)\n"
+        " local p=pack(peek(0x8000,3)) local q=pack(nil,nil) is(p.n==3 and p[1]==1 and p[3]==3 and q.n==2 and #pack()==0)\n"
         " cls() poke2(0x6000,0x1234,0x5678) is(pget(0,0)==4 and pget(3,0)==1 and pget(4,0)==8 and pget(7,0)==5)\n"
         " a,b=peek2(0x6000,2) is(a==0x1234 and b==0x5678)\n"
         " cls() for i=1,#r do pset(i-1,0,r[i] and 11 or 8) end\n"
@@ -1150,7 +1151,7 @@ static void multi_value_peek_poke_matches_pico8(void) {
     CHECK(p8p_runtime_load(runtime, &cart) == 0);
     CHECK(p8p_runtime_step(runtime, 0) == 0);
     const uint8_t *fb = p8p_runtime_framebuffer(runtime);
-    for (int index = 0; index < 16; ++index) {
+    for (int index = 0; index < 17; ++index) {
         if (fb[index] != 11)
             fprintf(stderr, "FAIL multi-value peek/poke case %d\n", index + 1);
         CHECK(fb[index] == 11);
