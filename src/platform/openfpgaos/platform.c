@@ -18,12 +18,18 @@
 
 #define P8P_SAFE_VIDEO_WIDTH 320
 #define P8P_SAFE_VIDEO_HEIGHT 288
+/* Runtimes with a 1:1 128x128 scaler slot let the Pocket integer-scale the
+ * PICO-8 screen to 11x (1408x1408) instead of our 2x into 320x288 (10x). */
+#define P8P_NATIVE_VIDEO_WIDTH P8P_SCREEN_WIDTH
+#define P8P_NATIVE_VIDEO_HEIGHT P8P_SCREEN_HEIGHT
 
 static uint8_t logical_framebuffer[P8P_SCREEN_WIDTH * P8P_SCREEN_HEIGHT];
 static of_video_mode_t active_mode;
 static int audio_ring_capacity;
 static int16_t audio_buffer[1024 * 2];
 static unsigned requested_scale;
+static int native_video;
+static int native_video_unavailable;
 static unsigned audio_volume = 100;
 static int audio_paused;
 static int audio_gain_q15 = 32768;
@@ -58,29 +64,56 @@ static void install_palette(void) {
     }
 }
 
-static int set_video_mode(void) {
+static int set_video_geometry(uint16_t width, uint16_t height) {
     of_video_mode_t requested;
     of_video_mode_t normalized;
 
     memset(&requested, 0, sizeof(requested));
-    requested.width = P8P_SAFE_VIDEO_WIDTH;
-    requested.height = P8P_SAFE_VIDEO_HEIGHT;
-    requested.stride = P8P_SAFE_VIDEO_WIDTH;
+    requested.width = width;
+    requested.height = height;
+    requested.stride = width;
     requested.color_mode = OF_VIDEO_MODE_8BIT;
     if (of_video_check_mode(&requested, &normalized) != 0 ||
-        normalized.width != P8P_SAFE_VIDEO_WIDTH ||
-        normalized.height != P8P_SAFE_VIDEO_HEIGHT ||
+        normalized.width != width ||
+        normalized.height != height ||
         normalized.color_mode != OF_VIDEO_MODE_8BIT ||
         of_video_set_mode(&normalized) != 0)
         return -1;
 
     of_video_get_mode(&active_mode);
-    if (active_mode.width != P8P_SAFE_VIDEO_WIDTH ||
-        active_mode.height != P8P_SAFE_VIDEO_HEIGHT ||
+    if (active_mode.width != width ||
+        active_mode.height != height ||
         active_mode.color_mode != OF_VIDEO_MODE_8BIT)
         return -1;
     install_palette();
     return 0;
+}
+
+static int set_video_mode(void) {
+    native_video = 0;
+    return set_video_geometry(P8P_SAFE_VIDEO_WIDTH, P8P_SAFE_VIDEO_HEIGHT);
+}
+
+/* Try the 128x128 scaler slot.  Any size without a slot of its own falls
+ * back to slot 0 and is stretched (the cropped image seen on hardware), so
+ * keep it only when the runtime reports a matching physical scanout. */
+static int set_native_video_mode(void) {
+    of_video_caps_t caps;
+
+    if (set_video_geometry(P8P_NATIVE_VIDEO_WIDTH, P8P_NATIVE_VIDEO_HEIGHT) != 0)
+        goto unavailable;
+    memset(&caps, 0, sizeof(caps));
+    of_video_get_caps(&caps);
+    if (caps.physical_width != P8P_NATIVE_VIDEO_WIDTH ||
+        caps.physical_height != P8P_NATIVE_VIDEO_HEIGHT)
+        goto unavailable;
+    native_video = 1;
+    return 0;
+
+unavailable:
+    /* Do not probe again on every settings save. */
+    native_video_unavailable = 1;
+    return set_video_mode() == 0 ? -1 : -2;
 }
 
 int p8p_platform_init(void) {
@@ -289,10 +322,21 @@ void p8p_platform_audio_set_volume(unsigned percent) {
 }
 
 unsigned p8p_platform_set_scale(unsigned scale) {
+    int want_native;
+
     if (scale > 2)
         scale = 2;
-    if (requested_scale != scale) {
+    /* AUTO and 2X use the 128x128 slot when the runtime has one; 1X keeps
+     * the small centred image, which only the 320x288 mode can show. */
+    want_native = scale != 1 && !native_video_unavailable;
+    if (requested_scale != scale || want_native != native_video) {
         requested_scale = scale;
+        if (want_native != native_video) {
+            if (want_native)
+                (void)set_native_video_mode();
+            else
+                (void)set_video_mode();
+        }
         of_video_clear(0);
     }
     return requested_scale;
