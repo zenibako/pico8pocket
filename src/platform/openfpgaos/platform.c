@@ -116,8 +116,25 @@ unavailable:
     return set_video_mode() == 0 ? -1 : -2;
 }
 
+/* Declare our scaler slots (must match dist/core/video.json).  Runtimes
+ * with a writable slot table then emit a real 128x128 raster for slot 6;
+ * older ones return -1 and keep their fixed table, which is fine because
+ * set_native_video_mode() only keeps 128x128 when caps report it. */
+static void declare_scaler_slots(void) {
+#ifdef OF_VIDEO_SCALER_SLOT_T_DEFINED
+    static const of_video_scaler_slot_t slots[OF_VIDEO_SCALER_SLOTS] = {
+        {320, 240}, {320, 200}, {320, 224}, {320, 256},
+        {320, 288}, {400, 300},
+        {P8P_NATIVE_VIDEO_WIDTH, P8P_NATIVE_VIDEO_HEIGHT},
+        {640, 480},
+    };
+    (void)of_video_set_scaler_slots(slots, OF_VIDEO_SCALER_SLOTS);
+#endif
+}
+
 int p8p_platform_init(void) {
     of_video_init();
+    declare_scaler_slots();
     /*
      * The current openfpgaOS Pocket bitstream has a proven 320x288 scanout
      * path.  Requesting 128x128 changes the software framebuffer geometry,

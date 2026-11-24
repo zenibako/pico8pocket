@@ -44,7 +44,7 @@ done
 
 SCALER_ORDER="$(jq -er '[.video.scaler_modes[] | "\(.width)x\(.height)"] | join(",")' \
     "$CORE_DIR/video.json")"
-EXPECTED_SCALER_ORDER="320x240,320x200,320x224,320x256,320x288,640x576,128x128,640x480"
+EXPECTED_SCALER_ORDER="320x240,320x200,320x224,320x256,320x288,400x300,128x128,640x480"
 [[ "$SCALER_ORDER" == "$EXPECTED_SCALER_ORDER" ]] || {
     echo "openfpgaOS scaler slots are out of order: $SCALER_ORDER" >&2
     exit 1
